@@ -389,8 +389,38 @@ def list_remote_groups(server: dict) -> list[dict]:
     return items
 
 
-def _fetch_access_token_for_account(server: dict, account_id: str) -> tuple[str, dict]:
-    """Return (access_token, account_meta) for a single sub2api account id."""
+def _build_local_account_item(remote_account: dict, credentials: dict, access_token: str) -> dict:
+    item: dict = {}
+    for key, value in credentials.items():
+        if key in {"accessToken", "token"}:
+            continue
+        if isinstance(value, str):
+            cleaned = _clean(value)
+            if cleaned:
+                item[key] = cleaned
+            continue
+        if value not in ("", None):
+            item[key] = value
+
+    email = _clean(credentials.get("email")) or _clean(remote_account.get("name"))
+    user_id = (
+        _clean(credentials.get("user_id"))
+        or _clean(credentials.get("chatgpt_user_id"))
+        or _clean(credentials.get("chatgpt_account_id"))
+    )
+    plan_type = _clean(credentials.get("plan_type")) or _clean(remote_account.get("type")) or "Free"
+
+    item.update({
+        "access_token": access_token,
+        "email": email or None,
+        "user_id": user_id or None,
+        "type": plan_type,
+    })
+    return item
+
+
+def _fetch_access_token_for_account(server: dict, account_id: str) -> dict:
+    """Return a local account item for a single sub2api account id."""
     base_url = _clean(server.get("base_url"))
     headers = _auth_headers(server)
 
@@ -414,10 +444,7 @@ def _fetch_access_token_for_account(server: dict, account_id: str) -> tuple[str,
     access_token = _extract_access_token(credentials)
     if not access_token:
         raise RuntimeError("missing access_token")
-    return access_token, {
-        "email": _clean(credentials.get("email")),
-        "plan_type": _clean(credentials.get("plan_type")),
-    }
+    return _build_local_account_item(account, credentials, access_token)
 
 
 def _decode_jwt_payload(access_token: str) -> dict:
@@ -473,7 +500,6 @@ def _build_remote_account_payload(server: dict, account: dict) -> dict:
         "access_token": access_token,
         "email": email,
         "user_id": user_id,
-        "chatgpt_account_id": user_id,
         "plan_type": plan_type,
         "expires_at": _clean(account.get("expires_at")) or _token_expires_at(access_token),
     }
@@ -673,7 +699,7 @@ class Sub2APIImportService:
     def _run_import(self, server_id: str, server: dict, account_ids: list[str]) -> None:
         self._update_job(server_id, status="running")
 
-        tokens: list[str] = []
+        account_items: list[dict] = []
         max_workers = min(8, max(1, len(account_ids)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_map = {
@@ -683,8 +709,7 @@ class Sub2APIImportService:
             for future in as_completed(future_map):
                 account_id = future_map[future]
                 try:
-                    token, _meta = future.result()
-                    tokens.append(token)
+                    account_items.append(future.result())
                 except Exception as exc:
                     self._append_error(server_id, account_id, str(exc) or "unknown error")
 
@@ -696,7 +721,7 @@ class Sub2APIImportService:
                     failed=failed,
                 )
 
-        if not tokens:
+        if not account_items:
             current = self._config.get_import_job(server_id) or {}
             self._update_job(
                 server_id,
@@ -706,7 +731,8 @@ class Sub2APIImportService:
             )
             return
 
-        add_result = account_service.add_accounts(tokens)
+        tokens = [_clean(item.get("access_token")) for item in account_items if _clean(item.get("access_token"))]
+        add_result = account_service.add_account_items(account_items)
         refresh_result = account_service.refresh_accounts(tokens)
         current = self._config.get_import_job(server_id) or {}
         self._update_job(

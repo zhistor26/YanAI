@@ -12,11 +12,21 @@ def _clean(value: object) -> str:
     return str(value or "").strip()
 
 
+def _int_or_zero(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _record_to_item(record: dict[str, object], base_url: str) -> dict[str, object]:
     url = _clean(record.get("url"))
     parsed_path = urlparse(url).path
     name = Path(parsed_path).name or _clean(record.get("id")) or "image.png"
-    size = int(record.get("size") or 0)
+    size = _int_or_zero(record.get("size"))
+    image_size = _clean(record.get("image_size"))
+    if not image_size and record.get("size") is not None and size == 0:
+        image_size = _clean(record.get("size"))
     if parsed_path.startswith("/images/"):
         local_path = config.images_dir / parsed_path.removeprefix("/images/")
         if local_path.exists() and local_path.is_file():
@@ -38,8 +48,9 @@ def _record_to_item(record: dict[str, object], base_url: str) -> dict[str, objec
         "prompt": record.get("prompt"),
         "mode": record.get("mode"),
         "model": record.get("model"),
+        "image_size": image_size,
         "channel": record.get("channel"),
-        "quota_cost": int(record.get("quota_cost") or 0),
+        "quota_cost": _int_or_zero(record.get("quota_cost")),
     }
 
 
@@ -151,7 +162,7 @@ def record_image_result(
             "prompt": prompt,
             "mode": mode,
             "model": model,
-            "size": size or "",
+            "image_size": size or "",
             "channel": channel,
             "url": url,
             "created_at": now,
