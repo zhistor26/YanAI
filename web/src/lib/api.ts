@@ -5,6 +5,12 @@ export type AccountStatus = "正常" | "限流" | "异常" | "禁用";
 export type ImageModel = "gpt-image-2" | "codex-gpt-image-2";
 export type AuthRole = "admin" | "user";
 
+export type CredentialPreview = {
+  present: boolean;
+  preview: string;
+  length: number;
+};
+
 export type Account = {
   id: string;
   access_token: string;
@@ -21,6 +27,15 @@ export type Account = {
   }>;
   default_model_slug?: string | null;
   restoreAt?: string | null;
+  oauthCredentials?: {
+    refreshToken: CredentialPreview;
+    idToken: CredentialPreview;
+    password: CredentialPreview;
+    createdAt?: string | null;
+    expiresAt?: string | null;
+    chatgptAccountId?: string | null;
+    chatgptUserId?: string | null;
+  };
   success: number;
   fail: number;
   lastUsedAt: string | null;
@@ -37,6 +52,11 @@ type AccountMutationResponse = {
   removed?: number;
   refreshed?: number;
   errors?: Array<{ access_token: string; error: string }>;
+};
+
+type AccountExportResponse = {
+  items: Array<Record<string, unknown>>;
+  count: number;
 };
 
 type AccountRefreshResponse = {
@@ -223,6 +243,13 @@ export async function createAccounts(tokens: string[]) {
 export async function deleteAccounts(tokens: string[]) {
   return httpRequest<AccountMutationResponse>("/api/accounts", {
     method: "DELETE",
+    body: { tokens },
+  });
+}
+
+export async function exportAccounts(tokens: string[]) {
+  return httpRequest<AccountExportResponse>("/api/accounts/export", {
+    method: "POST",
     body: { tokens },
   });
 }

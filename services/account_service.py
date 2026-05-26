@@ -172,6 +172,28 @@ class AccountService:
             return quota, restore_at, False
         return quota, restore_at, True
 
+    @staticmethod
+    def _credential_preview(value: Any) -> dict[str, Any]:
+        text = AccountService._clean_token(value)
+        if not text:
+            return {"present": False, "preview": "", "length": 0}
+        if len(text) <= 12:
+            preview = f"{text[:3]}...{text[-2:]}" if len(text) > 5 else "已保存"
+        else:
+            preview = f"{text[:8]}...{text[-6:]}"
+        return {"present": True, "preview": preview, "length": len(text)}
+
+    def _oauth_credentials_summary(self, account: dict) -> dict[str, Any]:
+        return {
+            "refreshToken": self._credential_preview(account.get("refresh_token")),
+            "idToken": self._credential_preview(account.get("id_token")),
+            "password": self._credential_preview(account.get("password")),
+            "createdAt": self._clean_token(account.get("created_at")) or None,
+            "expiresAt": self._clean_token(account.get("expires_at")) or None,
+            "chatgptAccountId": self._clean_token(account.get("chatgpt_account_id")) or None,
+            "chatgptUserId": self._clean_token(account.get("chatgpt_user_id")) or None,
+        }
+
     def _load_accounts(self) -> list[dict]:
         accounts = self.storage.load_accounts()
         return [normalized for item in accounts if (normalized := self._normalize_account(item)) is not None]
@@ -224,6 +246,7 @@ class AccountService:
                 "limits_progress": account.get("limits_progress") or [],
                 "default_model_slug": account.get("default_model_slug"),
                 "restoreAt": account.get("restore_at"),
+                "oauthCredentials": self._oauth_credentials_summary(account),
                 "success": int(account.get("success") or 0),
                 "fail": int(account.get("fail") or 0),
                 "lastUsedAt": account.get("last_used_at"),
@@ -327,6 +350,17 @@ class AccountService:
     def list_accounts(self) -> list[dict]:
         with self._lock:
             return self._public_items(self._accounts)
+
+    def export_accounts(self, access_tokens: list[str]) -> dict[str, Any]:
+        target_tokens = self._clean_tokens(access_tokens)
+        target_set = set(target_tokens)
+        with self._lock:
+            items = [
+                dict(account)
+                for account in self._accounts
+                if self._clean_token(account.get("access_token")) in target_set
+            ]
+        return {"items": items, "count": len(items)}
 
     def list_limited_tokens(self) -> list[str]:
         with self._lock:

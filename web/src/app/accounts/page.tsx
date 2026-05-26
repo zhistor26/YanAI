@@ -42,12 +42,14 @@ import {
 } from "@/components/ui/select";
 import {
   deleteAccounts,
+  exportAccounts,
   fetchAccounts,
   refreshAccounts,
   updateAccount,
   type Account,
   type AccountStatus,
   type AccountType,
+  type CredentialPreview,
 } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
@@ -155,6 +157,18 @@ function maskToken(token?: string) {
   return `${token.slice(0, 16)}...${token.slice(-8)}`;
 }
 
+function credentialStateLabel(present?: boolean) {
+  return present ? "已保存" : "未保存";
+}
+
+function credentialStateVariant(present?: boolean): ComponentProps<typeof Badge>["variant"] {
+  return present ? "success" : "secondary";
+}
+
+function formatCredentialDate(value?: string | null) {
+  return formatRestoreAt(value).absolute;
+}
+
 function downloadTokens(accounts: Account[]) {
   const content = `${accounts.map((account) => account.access_token).join("\n")}\n`;
   const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
@@ -162,6 +176,17 @@ function downloadTokens(accounts: Account[]) {
   const link = document.createElement("a");
   link.href = url;
   link.download = `accounts-${Date.now()}.txt`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function downloadJsonFile(filename: string, value: unknown) {
+  const content = `${JSON.stringify(value, null, 2)}\n`;
+  const blob = new Blob([content], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
   link.click();
   URL.revokeObjectURL(url);
 }
@@ -197,6 +222,9 @@ function AccountsPageContent() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
+  const [isExportingSelected, setIsExportingSelected] = useState(false);
+  const [isCopyingAccountJson, setIsCopyingAccountJson] = useState(false);
+  const [copyingExportField, setCopyingExportField] = useState<string | null>(null);
 
   const loadAccounts = async (silent = false) => {
     if (!silent) {
@@ -323,6 +351,91 @@ function AccountsPageContent() {
     }
   };
 
+  const handleCopyVisibleValue = async (label: string, value?: string | null) => {
+    const text = String(value || "").trim();
+    if (!text) {
+      toast.error(`${label} 没有可复制内容`);
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success(`${label} 已复制`);
+    } catch {
+      toast.error("复制失败，请检查浏览器剪贴板权限");
+    }
+  };
+
+  const handleExportSelectedAccounts = async () => {
+    if (selectedTokens.length === 0) {
+      toast.error("请先选择要导出的账户");
+      return;
+    }
+
+    setIsExportingSelected(true);
+    try {
+      const data = await exportAccounts(selectedTokens);
+      downloadJsonFile(`accounts-selected-${Date.now()}.json`, {
+        exported_at: new Date().toISOString(),
+        count: data.count,
+        items: data.items,
+      });
+      toast.success(`已导出 ${data.count} 个账号信息`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "导出账号信息失败";
+      toast.error(message);
+    } finally {
+      setIsExportingSelected(false);
+    }
+  };
+
+  const handleCopyEditingAccountJson = async () => {
+    if (!editingAccount) {
+      return;
+    }
+
+    setIsCopyingAccountJson(true);
+    try {
+      const data = await exportAccounts([editingAccount.access_token]);
+      const item = data.items[0];
+      if (!item) {
+        toast.error("未找到账号完整信息");
+        return;
+      }
+      await navigator.clipboard.writeText(`${JSON.stringify(item, null, 2)}\n`);
+      toast.success("完整账号 JSON 已复制");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "复制完整账号 JSON 失败";
+      toast.error(message);
+    } finally {
+      setIsCopyingAccountJson(false);
+    }
+  };
+
+  const handleCopyExportedAccountValue = async (field: string, label: string) => {
+    if (!editingAccount) {
+      return;
+    }
+
+    setCopyingExportField(field);
+    try {
+      const data = await exportAccounts([editingAccount.access_token]);
+      const rawValue = data.items[0]?.[field];
+      const text = typeof rawValue === "string" ? rawValue.trim() : rawValue == null ? "" : JSON.stringify(rawValue);
+      if (!text) {
+        toast.error(`${label} 未保存`);
+        return;
+      }
+      await navigator.clipboard.writeText(text);
+      toast.success(`${label} 已复制`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : `${label} 复制失败`;
+      toast.error(message);
+    } finally {
+      setCopyingExportField(null);
+    }
+  };
+
   const openEditDialog = (account: Account) => {
     setEditingAccount(account);
     setEditType(account.type);
@@ -361,6 +474,31 @@ function AccountsPageContent() {
     }
     setSelectedIds((prev) => prev.filter((id) => !currentRows.some((row) => row.id === id)));
   };
+
+  const renderVisibleCopyButton = (label: string, value?: string | null) => (
+    <button
+      type="button"
+      className="rounded-md p-1 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700"
+      title={`复制 ${label}`}
+      aria-label={`复制 ${label}`}
+      onClick={() => void handleCopyVisibleValue(label, value)}
+    >
+      <Copy className="size-3.5" />
+    </button>
+  );
+
+  const renderExportCopyButton = (label: string, field: string, present?: boolean) => (
+    <button
+      type="button"
+      className="rounded-md p-1 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
+      title={`复制完整 ${label}`}
+      aria-label={`复制完整 ${label}`}
+      disabled={!present || copyingExportField !== null || isCopyingAccountJson}
+      onClick={() => void handleCopyExportedAccountValue(field, label)}
+    >
+      {copyingExportField === field ? <LoaderCircle className="size-3.5 animate-spin" /> : <Copy className="size-3.5" />}
+    </button>
+  );
 
   return (
     <>
@@ -412,7 +550,7 @@ function AccountsPageContent() {
       </section>
 
       <Dialog open={Boolean(editingAccount)} onOpenChange={(open) => (!open ? setEditingAccount(null) : null)}>
-        <DialogContent showCloseButton={false} className="rounded-2xl p-6">
+        <DialogContent showCloseButton={false} className="max-h-[90vh] overflow-y-auto rounded-2xl p-6">
           <DialogHeader className="gap-2">
             <DialogTitle>编辑账户</DialogTitle>
             <DialogDescription className="text-sm leading-6">
@@ -420,6 +558,115 @@ function AccountsPageContent() {
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
+            <div className="rounded-xl border border-stone-200 bg-stone-50/80 p-4">
+              <div className="mb-3 flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+                <div>
+                  <div className="text-sm font-medium text-stone-700">OAuth 凭据</div>
+                  <div className="mt-1 text-xs text-stone-500">显示保存状态和脱敏摘要，完整值仍只保存在后端。</div>
+                </div>
+                <div className="flex shrink-0 flex-wrap items-center gap-2">
+                  <Badge variant="outline" className="rounded-md bg-white text-stone-600">
+                    {editingAccount?.oauthCredentials?.expiresAt ? "有过期时间" : "无过期时间"}
+                  </Badge>
+                  <Button
+                    variant="outline"
+                    className="h-8 rounded-lg border-stone-200 bg-white px-3 text-xs text-stone-700 hover:bg-stone-50"
+                    onClick={() => void handleCopyEditingAccountJson()}
+                    disabled={isCopyingAccountJson || copyingExportField !== null}
+                  >
+                    {isCopyingAccountJson ? <LoaderCircle className="size-3.5 animate-spin" /> : <Copy className="size-3.5" />}
+                    复制完整 JSON
+                  </Button>
+                </div>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-3">
+                {[
+                  ["refresh_token", "refresh_token", editingAccount?.oauthCredentials?.refreshToken],
+                  ["id_token", "id_token", editingAccount?.oauthCredentials?.idToken],
+                  ["password", "password", editingAccount?.oauthCredentials?.password],
+                ].map(([label, field, value]) => {
+                  const credential = value as CredentialPreview | undefined;
+                  return (
+                    <div key={label as string} className="rounded-lg border border-stone-200 bg-white px-3 py-2">
+                      <div className="mb-1 flex items-center justify-between gap-2">
+                        <span className="text-xs font-medium text-stone-500">{label as string}</span>
+                        <div className="flex items-center gap-1">
+                          <Badge variant={credentialStateVariant(credential?.present)} className="rounded-md px-1.5 py-0">
+                            {credentialStateLabel(credential?.present)}
+                          </Badge>
+                          {renderExportCopyButton(label as string, field as string, credential?.present)}
+                        </div>
+                      </div>
+                      <div className="truncate font-mono text-xs text-stone-700">
+                        {credential?.present ? credential.preview : "—"}
+                      </div>
+                      <div className="mt-1 text-xs text-stone-400">
+                        {credential?.present ? `${credential.length} 字符` : "无"}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2">
+                <div className="rounded-lg bg-white px-3 py-2">
+                  <div className="flex items-center justify-between gap-2 text-stone-400">
+                    <span>access_token</span>
+                    {renderVisibleCopyButton("access_token", editingAccount?.access_token)}
+                  </div>
+                  <div className="mt-1 truncate font-mono text-stone-700">
+                    {maskToken(editingAccount?.access_token)}
+                  </div>
+                </div>
+                <div className="rounded-lg bg-white px-3 py-2">
+                  <div className="flex items-center justify-between gap-2 text-stone-400">
+                    <span>email</span>
+                    {renderVisibleCopyButton("email", editingAccount?.email)}
+                  </div>
+                  <div className="mt-1 truncate font-mono text-stone-700">
+                    {editingAccount?.email || "—"}
+                  </div>
+                </div>
+                <div className="rounded-lg bg-white px-3 py-2">
+                  <div className="flex items-center justify-between gap-2 text-stone-400">
+                    <span>created_at</span>
+                    {renderVisibleCopyButton("created_at", editingAccount?.oauthCredentials?.createdAt)}
+                  </div>
+                  <div className="mt-1 font-mono text-stone-700">
+                    {formatCredentialDate(editingAccount?.oauthCredentials?.createdAt)}
+                  </div>
+                </div>
+                <div className="rounded-lg bg-white px-3 py-2">
+                  <div className="flex items-center justify-between gap-2 text-stone-400">
+                    <span>expires_at</span>
+                    {renderVisibleCopyButton("expires_at", editingAccount?.oauthCredentials?.expiresAt)}
+                  </div>
+                  <div className="mt-1 font-mono text-stone-700">
+                    {formatCredentialDate(editingAccount?.oauthCredentials?.expiresAt)}
+                  </div>
+                </div>
+                <div className="rounded-lg bg-white px-3 py-2">
+                  <div className="flex items-center justify-between gap-2 text-stone-400">
+                    <span>chatgpt_account_id</span>
+                    {renderVisibleCopyButton("chatgpt_account_id", editingAccount?.oauthCredentials?.chatgptAccountId)}
+                  </div>
+                  <div className="mt-1 truncate font-mono text-stone-700">
+                    {editingAccount?.oauthCredentials?.chatgptAccountId || "—"}
+                  </div>
+                </div>
+                <div className="rounded-lg bg-white px-3 py-2">
+                  <div className="flex items-center justify-between gap-2 text-stone-400">
+                    <span>chatgpt_user_id</span>
+                    {renderVisibleCopyButton(
+                      "chatgpt_user_id",
+                      editingAccount?.oauthCredentials?.chatgptUserId || editingAccount?.user_id,
+                    )}
+                  </div>
+                  <div className="mt-1 truncate font-mono text-stone-700">
+                    {editingAccount?.oauthCredentials?.chatgptUserId || editingAccount?.user_id || "—"}
+                  </div>
+                </div>
+              </div>
+            </div>
             <div className="space-y-2">
               <label className="text-sm font-medium text-stone-700">状态</label>
               <Select value={editStatus} onValueChange={(value) => setEditStatus(value as AccountStatus)}>
@@ -600,6 +847,15 @@ function AccountsPageContent() {
                 >
                   {isRefreshing ? <LoaderCircle className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
                   刷新选中账号信息和额度
+                </Button>
+                <Button
+                  variant="ghost"
+                  className="h-8 rounded-lg px-3 text-stone-500 hover:bg-stone-100"
+                  onClick={() => void handleExportSelectedAccounts()}
+                  disabled={selectedTokens.length === 0 || isExportingSelected}
+                >
+                  {isExportingSelected ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
+                  导出所选信息
                 </Button>
                 <Button
                   variant="ghost"

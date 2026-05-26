@@ -66,6 +66,62 @@ class AccountCapabilityTests(unittest.TestCase):
             self.assertEqual(updated["status"], "正常")
             self.assertTrue(updated["image_quota_unknown"])
 
+    def test_public_items_include_masked_oauth_credentials_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items(
+                [
+                    {
+                        "access_token": "access-token",
+                        "refresh_token": "refresh-token-secret",
+                        "id_token": "id-token-secret",
+                        "password": "password-secret",
+                        "created_at": "2026-05-26T00:00:00+00:00",
+                        "expires_at": "2026-06-01T00:00:00+00:00",
+                        "chatgpt_account_id": "account-id",
+                    }
+                ]
+            )
+
+            public = service.list_accounts()[0]["oauthCredentials"]
+
+            self.assertTrue(public["refreshToken"]["present"])
+            self.assertNotEqual(public["refreshToken"]["preview"], "refresh-token-secret")
+            self.assertEqual(public["refreshToken"]["length"], len("refresh-token-secret"))
+            self.assertTrue(public["idToken"]["present"])
+            self.assertTrue(public["password"]["present"])
+            self.assertEqual(public["createdAt"], "2026-05-26T00:00:00+00:00")
+            self.assertEqual(public["expiresAt"], "2026-06-01T00:00:00+00:00")
+            self.assertEqual(public["chatgptAccountId"], "account-id")
+
+    def test_export_accounts_returns_full_saved_oauth_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items(
+                [
+                    {
+                        "access_token": "access-token",
+                        "refresh_token": "refresh-token-secret",
+                        "id_token": "id-token-secret",
+                        "password": "password-secret",
+                        "created_at": "2026-05-26T00:00:00+00:00",
+                        "expires_at": "2026-06-01T00:00:00+00:00",
+                        "chatgpt_account_id": "account-id",
+                        "chatgpt_user_id": "user-id",
+                    }
+                ]
+            )
+
+            exported = service.export_accounts(["access-token"])
+
+            self.assertEqual(exported["count"], 1)
+            item = exported["items"][0]
+            self.assertEqual(item["refresh_token"], "refresh-token-secret")
+            self.assertEqual(item["id_token"], "id-token-secret")
+            self.assertEqual(item["password"], "password-secret")
+            self.assertEqual(item["chatgpt_account_id"], "account-id")
+            self.assertEqual(item["chatgpt_user_id"], "user-id")
+
 
 class TokenLogTests(unittest.TestCase):
     def test_anonymize_token_hides_raw_value(self) -> None:

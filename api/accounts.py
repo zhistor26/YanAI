@@ -45,6 +45,10 @@ class AccountRefreshRequest(BaseModel):
     access_tokens: list[str] = Field(default_factory=list)
 
 
+class AccountExportRequest(BaseModel):
+    tokens: list[str] = Field(default_factory=list)
+
+
 class AccountUpdateRequest(BaseModel):
     access_token: str = ""
     type: str | None = None
@@ -164,6 +168,14 @@ def create_router() -> APIRouter:
         if not tokens:
             raise HTTPException(status_code=400, detail={"error": "tokens is required"})
         return account_service.delete_accounts(tokens)
+
+    @router.post("/api/accounts/export")
+    async def export_accounts(body: AccountExportRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        tokens = [str(token or "").strip() for token in body.tokens if str(token or "").strip()]
+        if not tokens:
+            raise HTTPException(status_code=400, detail={"error": "tokens is required"})
+        return account_service.export_accounts(tokens)
 
     @router.post("/api/accounts/refresh")
     async def refresh_accounts(body: AccountRefreshRequest, authorization: str | None = Header(default=None)):
