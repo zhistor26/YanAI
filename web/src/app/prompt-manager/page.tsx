@@ -236,7 +236,7 @@ function PromptManagerContent() {
         <div className="space-y-1">
           <div className="text-xs font-semibold tracking-[0.18em] text-stone-500 uppercase">Prompts</div>
           <h1 className="text-2xl font-semibold tracking-tight">提示词管理</h1>
-          <p className="text-sm text-stone-500">源自 glidea/banana-prompt-quicker，仅保留非 NSFW 条目，可在这里添加、修改和删除。</p>
+          <p className="text-sm text-stone-500">源自 glidea/banana-prompt-quicker，可在这里添加、修改和删除。</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <Button variant="outline" onClick={() => void loadPrompts()} disabled={isLoading} className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700">
@@ -340,7 +340,7 @@ function PromptManagerContent() {
               {editingItem ? "编辑提示词" : "添加提示词"}
             </DialogTitle>
             <DialogDescription className="text-stone-500">
-              标题、提示词和示例图会出现在画图页的更多提示词里，NSFW 条目不会被保存。
+              标题、提示词和示例图会出现在画图页的更多提示词里。
             </DialogDescription>
           </DialogHeader>
           <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-6">

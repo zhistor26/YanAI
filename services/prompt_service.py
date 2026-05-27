@@ -72,19 +72,8 @@ def _normalize_url_list(value: object) -> list[str]:
     return [url for item in candidates if (url := _clean(item))]
 
 
-def is_nsfw_prompt(raw: object) -> bool:
-    if not isinstance(raw, dict):
-        return False
-    return any(
-        "nsfw" in _clean(raw.get(key)).lower()
-        for key in ("title", "prompt", "category", "sub_category")
-    )
-
-
 def _normalize_prompt(raw: object, *, generated_id: bool = True) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
-        return None
-    if is_nsfw_prompt(raw):
         return None
     title = _clean(raw.get("title"))
     prompt = _clean(raw.get("prompt"))
@@ -127,7 +116,7 @@ class PromptLibraryService:
         except Exception:
             stored = []
         items = [_normalize_prompt(item) for item in stored if isinstance(item, dict)]
-        normalized = [item for item in items if item is not None and not is_nsfw_prompt(item)]
+        normalized = [item for item in items if item is not None]
         if normalized:
             return normalized
         return self._load_bootstrap_items()
@@ -147,7 +136,7 @@ class PromptLibraryService:
             if not isinstance(raw_items, list):
                 continue
             items = [_normalize_prompt(item) for item in raw_items if isinstance(item, dict)]
-            normalized = [item for item in items if item is not None and not is_nsfw_prompt(item)]
+            normalized = [item for item in items if item is not None]
             if normalized:
                 return normalized
         return []
@@ -156,11 +145,9 @@ class PromptLibraryService:
         self.storage.save_prompt_library(self._items)
 
     def list_prompts(self) -> list[dict[str, Any]]:
-        return [dict(item) for item in self._items if not is_nsfw_prompt(item)]
+        return [dict(item) for item in self._items]
 
     def create_prompt(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if is_nsfw_prompt(payload):
-            raise ValueError("NSFW prompts are not allowed")
         item = _normalize_prompt({**payload, "id": uuid.uuid4().hex[:16]}, generated_id=False)
         if item is None:
             raise ValueError("title and prompt are required")
@@ -172,8 +159,6 @@ class PromptLibraryService:
         return dict(item)
 
     def update_prompt(self, prompt_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
-        if is_nsfw_prompt(payload):
-            raise ValueError("NSFW prompts are not allowed")
         normalized_id = _clean(prompt_id)
         if not normalized_id:
             return None

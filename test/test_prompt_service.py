@@ -21,12 +21,6 @@ class PromptLibraryServiceTests(unittest.TestCase):
                                 "prompt": "生成一张海报",
                                 "mode": "generate",
                                 "category": "工作",
-                            },
-                            {
-                                "title": "NSFW 提示词",
-                                "prompt": "NSFW content",
-                                "mode": "generate",
-                                "category": "NSFW",
                             }
                         ]
                     },
@@ -38,8 +32,6 @@ class PromptLibraryServiceTests(unittest.TestCase):
             service = PromptLibraryService(storage, bootstrap_paths=(seed_path,), assets_dir=root / "assets")
 
             self.assertEqual(len(service.list_prompts()), 1)
-            with self.assertRaises(ValueError):
-                service.create_prompt({"title": "NSFW", "prompt": "NSFW content"})
 
             created = service.create_prompt(
                 {

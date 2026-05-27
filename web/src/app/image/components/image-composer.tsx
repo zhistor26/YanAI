@@ -554,12 +554,6 @@ function getPromptCategoryLabel(item: BananaPromptItem) {
   return [item.category, item.sub_category].filter(Boolean).join(" / ") || "未分类";
 }
 
-function isNsfwBananaPrompt(item: BananaPromptItem) {
-  return [item.category, item.sub_category, item.title, item.prompt]
-    .filter(Boolean)
-    .some((value) => String(value).toLowerCase().includes("nsfw"));
-}
-
 function getBananaPromptPreviewUrl(item: BananaPromptItem) {
   const candidate = item.preview || item.reference_image_urls?.[0];
   if (!candidate) {
@@ -591,7 +585,7 @@ function normalizeBananaPromptsPayload(payload: unknown) {
       ? (payload as { prompts: unknown[] }).prompts
       : [];
 
-  return maybeItems.filter(isBananaPromptItem).filter((item) => !isNsfwBananaPrompt(item));
+  return maybeItems.filter(isBananaPromptItem);
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number) {

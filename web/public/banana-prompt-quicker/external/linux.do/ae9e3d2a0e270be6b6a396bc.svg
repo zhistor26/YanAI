@@ -10,7 +10,7 @@
   <circle cx="600" cy="334" r="92" fill="#f5f5f4" stroke="#d6d3d1" stroke-width="3"/>
   <path d="M552 348l35 35 68-86" fill="none" stroke="#78716c" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
   <text x="600" y="500" text-anchor="middle" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="42" font-weight="700" fill="#292524">绀轰緥鍥炬殏鏈绾夸繚瀛?/text>
-  <text x="600" y="566" text-anchor="middle" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="28" fill="#57534e">生成人物[NSFW]素体设计图</text>
+  <text x="600" y="566" text-anchor="middle" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="28" fill="#57534e">生成人物基础设计图</text>
   <text x="600" y="636" text-anchor="middle" font-family="Arial, 'Microsoft YaHei', sans-serif" font-size="20" fill="#78716c">婧愮珯鎷掔粷鎴栬秴鏃讹紝宸蹭繚鐣欏師濮嬪湴鍧€鐢ㄤ簬鍚庣画鍚屾</text>
   <text x="600" y="690" text-anchor="middle" font-family="Arial, sans-serif" font-size="16" fill="#a8a29e">/banana-prompt-quicker/external/linux.do/ae9e3d2a0e270be6b6a396bc.jpeg</text>
 </svg>

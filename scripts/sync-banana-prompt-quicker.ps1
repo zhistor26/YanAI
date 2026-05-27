@@ -382,18 +382,6 @@ function Get-PromptsPayload {
   return Invoke-DownloadText @("$($cdnBase)prompts.json", "$($rawBase)prompts.json")
 }
 
-function Test-NsfwPromptItem {
-  param([object]$Item)
-
-  foreach ($value in @($Item.category, $Item.sub_category, $Item.title, $Item.prompt)) {
-    if ($value -and ([string]$value) -match "(?i)nsfw") {
-      return $true
-    }
-  }
-
-  return $false
-}
-
 $outputRootPath = Resolve-WorkspacePath $OutputRoot
 Initialize-Directory $outputRootPath
 
@@ -432,7 +420,6 @@ if ($sourceRootPath) {
 $jsonText = Get-PromptsPayload $sourceRootPath
 $payload = $jsonText | ConvertFrom-Json
 $items = if ($payload -is [array]) { $payload } elseif ($payload.prompts) { $payload.prompts } else { @() }
-$items = @($items | Where-Object { -not (Test-NsfwPromptItem $_) })
 
 foreach ($item in $items) {
   if ($item.preview) {
