@@ -565,6 +565,25 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
             emitted_for_token = False
             returned_message = False
             returned_result = False
+            released = False
+
+            def release_lease(success: bool | None, reason: str, error: str = "") -> None:
+                nonlocal released
+                if released:
+                    return
+                account_service.release_image_account(lease, success)
+                released = True
+                detail = {
+                    "request_id": lease.lease_owner,
+                    "lease_owner": lease.lease_owner,
+                    "token": anonymize_token(token),
+                    "success": success,
+                    "reason": reason,
+                }
+                if error:
+                    detail["error"] = error
+                log_service.add(LOG_TYPE_ACCOUNT, "释放账号租约", detail, request_id=lease.lease_owner)
+
             try:
                 backend = OpenAIBackendAPI(access_token=token)
                 for output in stream_image_outputs(backend, request, index, request.n):
@@ -581,65 +600,16 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                     returned_result = returned_result or output.kind == "result"
                     yield output
                 if returned_message or not returned_result:
-                    account_service.release_image_account(lease, False)
-                    log_service.add(
-                        LOG_TYPE_ACCOUNT,
-                        "释放账号租约",
-                        {
-                            "request_id": lease.lease_owner,
-                            "lease_owner": lease.lease_owner,
-                            "token": anonymize_token(token),
-                            "success": False,
-                            "reason": "message",
-                        },
-                        request_id=lease.lease_owner,
-                    )
+                    release_lease(False, "message")
                     return
-                account_service.release_image_account(lease, True)
-                log_service.add(
-                    LOG_TYPE_ACCOUNT,
-                    "释放账号租约",
-                    {
-                        "request_id": lease.lease_owner,
-                        "lease_owner": lease.lease_owner,
-                        "token": anonymize_token(token),
-                        "success": True,
-                        "reason": "result",
-                    },
-                    request_id=lease.lease_owner,
-                )
+                release_lease(True, "result")
                 break
             except ImageGenerationError:
-                account_service.release_image_account(lease, False)
-                log_service.add(
-                    LOG_TYPE_ACCOUNT,
-                    "释放账号租约",
-                    {
-                        "request_id": lease.lease_owner,
-                        "lease_owner": lease.lease_owner,
-                        "token": anonymize_token(token),
-                        "success": False,
-                        "reason": "image_generation_error",
-                    },
-                    request_id=lease.lease_owner,
-                )
+                release_lease(False, "image_generation_error")
                 raise
             except Exception as exc:
-                account_service.release_image_account(lease, False)
                 last_error = str(exc)
-                log_service.add(
-                    LOG_TYPE_ACCOUNT,
-                    "释放账号租约",
-                    {
-                        "request_id": lease.lease_owner,
-                        "lease_owner": lease.lease_owner,
-                        "token": anonymize_token(token),
-                        "success": False,
-                        "reason": "exception",
-                        "error": last_error,
-                    },
-                    request_id=lease.lease_owner,
-                )
+                release_lease(False, "exception", last_error)
                 logger.warning({
                     "event": "image_stream_fail",
                     "request_id": lease_owner,
@@ -650,6 +620,14 @@ def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[Ima
                     account_service.remove_invalid_token(token, "image_stream")
                     continue
                 raise ImageGenerationError(last_error or "image generation failed") from exc
+            finally:
+                if not released:
+                    if returned_result:
+                        release_lease(True, "generator_closed_after_result")
+                    elif emitted_for_token or returned_message:
+                        release_lease(False, "generator_closed")
+                    else:
+                        release_lease(False, "generator_closed_before_output")
 
     if not emitted:
         raise ImageGenerationError(last_error or "image generation failed")

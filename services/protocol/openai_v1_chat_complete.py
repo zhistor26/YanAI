@@ -123,24 +123,28 @@ def image_result_content(result: dict[str, Any]) -> str:
 
 def image_chat_response(body: dict[str, Any]) -> dict[str, Any]:
     model, prompt, n, images = chat_image_args(body)
+    request_id = str(body.get("request_id") or "")
     result = collect_image_outputs(stream_image_outputs_with_pool(ConversationRequest(
         prompt=prompt,
         model=model,
         n=n,
         response_format="b64_json",
         images=encode_images(images) or None,
+        request_id=request_id,
     )))
     return completion_response(model, image_result_content(result), int(result.get("created") or 0) or None)
 
 
 def image_chat_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
     model, prompt, n, images = chat_image_args(body)
+    request_id = str(body.get("request_id") or "")
     image_outputs = stream_image_outputs_with_pool(ConversationRequest(
         prompt=prompt,
         model=model,
         n=n,
         response_format="b64_json",
         images=encode_images(images) or None,
+        request_id=request_id,
     ))
     yield from stream_image_chat_completion(image_outputs, model)
 

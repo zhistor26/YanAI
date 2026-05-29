@@ -265,6 +265,7 @@ def create_router() -> APIRouter:
         payload = body.model_dump(mode="python")
         model = str(payload.get("model") or "auto")
         request_id = request_id_from_request(request)
+        payload["request_id"] = request_id
         call = LoggedCall(identity, "/v1/chat/completions", model, "文本生成", request_id=request_id)
         return await call.run(openai_v1_chat_complete.handle, payload)
 
@@ -280,6 +281,7 @@ def create_router() -> APIRouter:
         payload = body.model_dump(mode="python")
         model = str(payload.get("model") or "auto")
         request_id = request_id_from_request(request)
+        payload["request_id"] = request_id
         call = LoggedCall(identity, "/v1/responses", model, "Responses", request_id=request_id)
         return await call.run(openai_v1_response.handle, payload)
 
@@ -297,6 +299,7 @@ def create_router() -> APIRouter:
         payload = body.model_dump(mode="python")
         model = str(payload.get("model") or "auto")
         request_id = request_id_from_request(request)
+        payload["request_id"] = request_id
         call = LoggedCall(identity, "/v1/messages", model, "Messages", request_id=request_id)
         return await call.run(anthropic_v1_messages.handle, payload, sse="anthropic")
 

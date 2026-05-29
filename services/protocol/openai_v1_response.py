@@ -154,23 +154,28 @@ def stream_image_response(image_outputs: Iterable[ImageOutput], prompt: str, mod
     response_id = f"resp_{uuid.uuid4().hex}"
     created = int(time.time())
     yield response_created(response_id, model, created)
-    for output in image_outputs:
-        if output.kind == "message":
-            text = output.text
-            item = text_output_item(text)
-            yield {"type": "response.output_text.delta", "item_id": item["id"], "output_index": 0, "content_index": 0, "delta": text}
-            yield {"type": "response.output_text.done", "item_id": item["id"], "output_index": 0, "content_index": 0, "text": text}
-            yield {"type": "response.output_item.done", "output_index": 0, "item": item}
-            yield response_completed(response_id, model, created, [item])
-            return
-        if output.kind != "result":
-            continue
-        items = image_output_items(prompt, output.data)
-        if items:
-            item = items[0]
-            yield {"type": "response.output_item.done", "output_index": 0, "item": item}
-            yield response_completed(response_id, model, created, [item])
-            return
+    try:
+        for output in image_outputs:
+            if output.kind == "message":
+                text = output.text
+                item = text_output_item(text)
+                yield {"type": "response.output_text.delta", "item_id": item["id"], "output_index": 0, "content_index": 0, "delta": text}
+                yield {"type": "response.output_text.done", "item_id": item["id"], "output_index": 0, "content_index": 0, "text": text}
+                yield {"type": "response.output_item.done", "output_index": 0, "item": item}
+                yield response_completed(response_id, model, created, [item])
+                return
+            if output.kind != "result":
+                continue
+            items = image_output_items(prompt, output.data)
+            if items:
+                item = items[0]
+                yield {"type": "response.output_item.done", "output_index": 0, "item": item}
+                yield response_completed(response_id, model, created, [item])
+                return
+    finally:
+        close = getattr(image_outputs, "close", None)
+        if callable(close):
+            close()
     raise RuntimeError("image generation failed")
 
 
@@ -193,6 +198,7 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
     if not prompt:
         raise HTTPException(status_code=400, detail={"error": "input text is required"})
     model = str(body.get("model") or "gpt-image-2").strip() or "gpt-image-2"
+    request_id = str(body.get("request_id") or "")
     image_info = extract_response_image(body.get("input"))
     if image_info:
         image_data, mime_type = image_info
@@ -205,6 +211,7 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         size=None if images else "1:1",
         response_format="b64_json",
         images=images,
+        request_id=request_id,
     ))
     yield from stream_image_response(image_outputs, prompt, model)
 

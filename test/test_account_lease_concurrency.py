@@ -8,10 +8,12 @@ from threading import Barrier, Event, Lock
 import time
 import tempfile
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("CHATGPT2API_AUTH_KEY", "test-auth")
 
 from services.account_service import AccountService
+from services.protocol import conversation, openai_v1_response
 from services.storage.database_storage import DatabaseStorageBackend
 
 
@@ -119,6 +121,75 @@ class AccountLeaseConcurrencyTest(unittest.TestCase):
             self.assertIsNone(account["lease_owner"])
             self.assertEqual(account["fail"], 1)
             storage.close()
+
+    def test_generator_close_after_result_releases_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            storage = DatabaseStorageBackend(f"sqlite:///{(Path(tmp_dir) / 'closed.db').as_posix()}")
+            service = AccountService(storage.repository_provider)
+            service.add_account_items([{"access_token": "token-a", "status": "正常", "quota": 5}])
+
+            class FakeBackend:
+                def __init__(self, access_token: str) -> None:
+                    self.access_token = access_token
+
+            class FakeLogService:
+                def add(self, *args, **kwargs) -> None:
+                    return None
+
+            def fake_stream_image_outputs(backend, request, index, total):
+                self.assertEqual(backend.access_token, "token-a")
+                yield conversation.ImageOutput(
+                    kind="result",
+                    model=request.model,
+                    index=index,
+                    total=total,
+                    data=[{"b64_json": "aW1hZ2U="}],
+                )
+
+            with (
+                patch.object(conversation, "account_service", service),
+                patch.object(conversation, "OpenAIBackendAPI", FakeBackend),
+                patch.object(conversation, "log_service", FakeLogService()),
+                patch.object(conversation, "stream_image_outputs", fake_stream_image_outputs),
+            ):
+                outputs = conversation.stream_image_outputs_with_pool(
+                    conversation.ConversationRequest(
+                        prompt="draw",
+                        model="gpt-image-2",
+                        request_id="req-close",
+                    )
+                )
+                first = next(outputs)
+                self.assertEqual(first.kind, "result")
+                outputs.close()
+
+            account = service.export_accounts(["token-a"])["items"][0]
+            self.assertEqual(account["inflight_count"], 0)
+            self.assertIsNone(account["lease_owner"])
+            self.assertEqual(account["quota"], 4)
+            self.assertEqual(account["success"], 1)
+            storage.close()
+
+    def test_responses_image_stream_closes_after_first_result(self) -> None:
+        closed = False
+
+        def outputs():
+            nonlocal closed
+            try:
+                yield conversation.ImageOutput(
+                    kind="result",
+                    model="gpt-image-2",
+                    index=1,
+                    total=1,
+                    data=[{"b64_json": "aW1hZ2U="}],
+                )
+            finally:
+                closed = True
+
+        events = list(openai_v1_response.stream_image_response(outputs(), "draw", "gpt-image-2"))
+
+        self.assertTrue(closed)
+        self.assertEqual(events[-1]["type"], "response.completed")
 
 
 if __name__ == "__main__":
