@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from urllib.parse import quote, unquote
 
 from services.storage.base import StorageBackend
 from services.storage.database_storage import DatabaseStorageBackend
@@ -20,6 +21,7 @@ def create_storage_backend(data_dir: Path) -> StorageBackend:
     - GIT_TOKEN: Git 访问令牌 (用于 git)
     - GIT_BRANCH: Git 分支 (默认 main)
     - GIT_FILE_PATH: Git 仓库中的文件路径 (默认 accounts.json)
+    - GIT_*_FILE_PATH: Git 仓库中各数据集的文件路径
     """
     backend_type = os.getenv("STORAGE_BACKEND", "json").lower().strip()
     
@@ -41,6 +43,7 @@ def create_storage_backend(data_dir: Path) -> StorageBackend:
             database_url = f"sqlite:///{data_dir / 'accounts.db'}"
             print(f"[storage] No DATABASE_URL provided, using local SQLite: {database_url}")
         else:
+            database_url = _normalize_database_url(database_url)
             print(f"[storage] Using database storage: {_mask_password(database_url)}")
         
         return DatabaseStorageBackend(database_url)
@@ -52,7 +55,12 @@ def create_storage_backend(data_dir: Path) -> StorageBackend:
         branch = os.getenv("GIT_BRANCH", "main").strip()
         file_path = os.getenv("GIT_FILE_PATH", "accounts.json").strip()
         auth_keys_file_path = os.getenv("GIT_AUTH_KEYS_FILE_PATH", "auth_keys.json").strip()
+        users_file_path = os.getenv("GIT_USERS_FILE_PATH", "users.json").strip()
+        sessions_file_path = os.getenv("GIT_SESSIONS_FILE_PATH", "sessions.json").strip()
+        redeem_codes_file_path = os.getenv("GIT_REDEEM_CODES_FILE_PATH", "redeem_codes.json").strip()
+        channels_file_path = os.getenv("GIT_CHANNELS_FILE_PATH", "channels.json").strip()
         prompt_library_file_path = os.getenv("GIT_PROMPT_LIBRARY_FILE_PATH", "prompt_library.json").strip()
+        image_records_file_path = os.getenv("GIT_IMAGE_RECORDS_FILE_PATH", "image_records.json").strip()
         
         if not repo_url:
             raise ValueError(
@@ -69,7 +77,12 @@ def create_storage_backend(data_dir: Path) -> StorageBackend:
             branch=branch,
             file_path=file_path,
             auth_keys_file_path=auth_keys_file_path,
+            users_file_path=users_file_path,
+            sessions_file_path=sessions_file_path,
+            redeem_codes_file_path=redeem_codes_file_path,
+            channels_file_path=channels_file_path,
             prompt_library_file_path=prompt_library_file_path,
+            image_records_file_path=image_records_file_path,
             local_cache_dir=cache_dir,
         )
     
@@ -94,6 +107,45 @@ def _mask_password(url: str) -> str:
         return url
     except Exception:
         return url
+
+
+def _strip_wrapping_quotes(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        return value[1:-1].strip()
+    return value
+
+
+def _normalize_database_url(url: str) -> str:
+    """URL-encode user info so raw password characters do not break SQLAlchemy parsing."""
+    url = _strip_wrapping_quotes(url)
+    if "://" not in url or "@" not in url:
+        return url
+
+    protocol, rest = url.split("://", 1)
+    if protocol.startswith("sqlite") or rest.startswith("/"):
+        return url
+
+    authority_end = min(
+        [index for marker in ("/", "?", "#") if (index := rest.find(marker)) != -1],
+        default=len(rest),
+    )
+    authority = rest[:authority_end]
+    suffix = rest[authority_end:]
+    if "@" not in authority:
+        return url
+
+    credentials, host = authority.rsplit("@", 1)
+    if not credentials:
+        return url
+
+    if ":" in credentials:
+        username, password = credentials.split(":", 1)
+        encoded_credentials = f"{quote(unquote(username), safe='')}:{quote(unquote(password), safe='')}"
+    else:
+        encoded_credentials = quote(unquote(credentials), safe="")
+
+    return f"{protocol}://{encoded_credentials}@{host}{suffix}"
 
 
 def _mask_token(url: str) -> str:
