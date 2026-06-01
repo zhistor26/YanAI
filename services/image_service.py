@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 import uuid
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from services.config import config
 from services.observability import get_current_request_id
@@ -85,6 +85,61 @@ def _image_record_source() -> ImageRecordRepository | StorageBackend:
     if repositories is not None:
         return repositories.image_records
     return config.get_storage_backend()
+
+
+def _dedupe_text(values: list[str] | tuple[str, ...] | None) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values or []:
+        normalized = _clean(value)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+    return result
+
+
+def _record_id(record: dict[str, object]) -> str:
+    return _clean(record.get("record_id") or record.get("id"))
+
+
+def _local_image_path_from_url(url: str) -> Path | None:
+    parsed_path = unquote(urlparse(_clean(url)).path)
+    if not parsed_path.startswith("/images/"):
+        return None
+    relative_path = parsed_path.removeprefix("/images/").strip("/")
+    if not relative_path:
+        return None
+    root = config.images_dir.resolve()
+    candidate = (root / relative_path).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    return candidate
+
+
+def _prune_empty_image_dirs(path: Path) -> None:
+    root = config.images_dir.resolve()
+    current = path.resolve()
+    while current != root:
+        try:
+            current.relative_to(root)
+        except ValueError:
+            return
+        try:
+            current.rmdir()
+        except OSError:
+            return
+        current = current.parent
+
+
+def _delete_local_image_file(url: str) -> bool:
+    path = _local_image_path_from_url(url)
+    if path is None or not path.is_file():
+        return False
+    path.unlink()
+    _prune_empty_image_dirs(path.parent)
+    return True
 
 
 def _list_files(base_url: str, start_date: str = "", end_date: str = "", seen_urls: set[str] | None = None) -> list[dict[str, object]]:
@@ -192,6 +247,77 @@ def list_images(
             "total": total,
             "page_count": page_count,
         },
+    }
+
+
+def delete_images(
+    *,
+    record_ids: list[str] | tuple[str, ...] | None = None,
+    urls: list[str] | tuple[str, ...] | None = None,
+) -> dict[str, object]:
+    requested_ids = set(_dedupe_text(record_ids))
+    requested_urls = set(_dedupe_text(urls))
+    if not requested_ids and not requested_urls:
+        return {
+            "removed": 0,
+            "removed_records": 0,
+            "removed_files": 0,
+            "ids": [],
+            "urls": [],
+        }
+
+    storage = _image_record_source()
+    try:
+        records = storage.list() if isinstance(storage, ImageRecordRepository) else storage.load_image_records()
+    except Exception:
+        records = []
+
+    matched_records: list[dict[str, object]] = []
+    remaining_records: list[dict[str, object]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        record_id = _record_id(record)
+        record_url = _clean(record.get("url"))
+        if (record_id and record_id in requested_ids) or (record_url and record_url in requested_urls):
+            matched_records.append(record)
+        else:
+            remaining_records.append(record)
+
+    removed_record_ids: list[str] = []
+    if matched_records:
+        if isinstance(storage, ImageRecordRepository):
+            for record in matched_records:
+                record_id = _record_id(record)
+                if record_id and storage.delete(record_id):
+                    removed_record_ids.append(record_id)
+        else:
+            storage.save_image_records(remaining_records)
+            removed_record_ids = [_record_id(record) for record in matched_records if _record_id(record)]
+
+    removed_record_id_set = set(removed_record_ids)
+    record_urls = [
+        _clean(record.get("url"))
+        for record in matched_records
+        if not isinstance(storage, ImageRecordRepository) or _record_id(record) in removed_record_id_set
+    ]
+    urls_to_delete = _dedupe_text([*requested_urls, *record_urls])
+    removed_file_urls = [url for url in urls_to_delete if _delete_local_image_file(url)]
+
+    removed_images: set[str] = set()
+    for record in matched_records:
+        record_id = _record_id(record)
+        if isinstance(storage, ImageRecordRepository) and record_id not in removed_record_id_set:
+            continue
+        removed_images.add(_clean(record.get("url")) or record_id)
+    removed_images.update(removed_file_urls)
+
+    return {
+        "removed": len(removed_images),
+        "removed_records": len(removed_record_ids),
+        "removed_files": len(removed_file_urls),
+        "ids": removed_record_ids,
+        "urls": removed_file_urls,
     }
 
 

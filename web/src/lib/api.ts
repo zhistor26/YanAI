@@ -125,6 +125,12 @@ export type ManagedImage = {
   quota_cost?: number;
 };
 
+export type ManagedImageDeleteTarget = {
+  id?: string;
+  record_id?: string;
+  url: string;
+};
+
 export type ImageListPagination = {
   page: number;
   page_size: number;
@@ -476,6 +482,16 @@ export async function fetchManagedImages(filters: {
   if (filters.page) params.set("page", String(filters.page));
   if (filters.page_size) params.set("page_size", String(filters.page_size));
   return httpRequest<ImageListResponse>(`/api/images${params.toString() ? `?${params.toString()}` : ""}`);
+}
+
+export async function deleteManagedImages(items: ManagedImageDeleteTarget[]) {
+  return httpRequest<{ removed: number; removed_records: number; removed_files: number; ids: string[]; urls: string[] }>(
+    "/api/images",
+    {
+      method: "DELETE",
+      body: { items },
+    },
+  );
 }
 
 export async function fetchPromptLibrary() {

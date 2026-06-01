@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from api.support import require_admin, require_identity, resolve_image_base_url
 from services.account_service import account_service
 from services.auth_service import auth_service
 from services.config import config
-from services.image_service import list_images
+from services.image_service import delete_images, list_images
 from services.log_service import LOG_TYPE_AUDIT, audit_service, log_service
 from services.proxy_service import test_proxy
 
@@ -24,6 +24,18 @@ class ProxyTestRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str = ""
     password: str = ""
+
+
+class ImageDeleteItem(BaseModel):
+    id: str = ""
+    record_id: str = ""
+    url: str = ""
+
+
+class ImageDeleteRequest(BaseModel):
+    ids: list[str] = Field(default_factory=list)
+    urls: list[str] = Field(default_factory=list)
+    items: list[ImageDeleteItem] = Field(default_factory=list)
 
 
 def create_router(app_version: str) -> APIRouter:
@@ -140,6 +152,32 @@ def create_router(app_version: str) -> APIRouter:
             page=page,
             page_size=page_size,
         )
+
+    @router.delete("/api/images")
+    async def delete_image_items(body: ImageDeleteRequest, authorization: str | None = Header(default=None)):
+        admin = require_admin(authorization)
+        record_ids = [
+            *body.ids,
+            *[item.record_id or item.id for item in body.items if item.record_id or item.id],
+        ]
+        urls = [
+            *body.urls,
+            *[item.url for item in body.items if item.url],
+        ]
+        if not any(str(value or "").strip() for value in [*record_ids, *urls]):
+            raise HTTPException(status_code=400, detail={"error": "image ids or urls are required"})
+        result = delete_images(record_ids=record_ids, urls=urls)
+        audit_service.add(
+            actor=admin,
+            action="images.delete",
+            resource="image",
+            target_id=",".join(str(value) for value in record_ids[:5] if str(value).strip()),
+            detail={
+                "requested": len(body.items) or len(record_ids) or len(urls),
+                **result,
+            },
+        )
+        return result
 
     @router.get("/api/logs")
     async def get_logs(

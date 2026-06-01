@@ -96,6 +96,73 @@ class ImageServiceTests(unittest.TestCase):
         self.assertEqual(result["pagination"]["page"], 2)
         self.assertEqual(result["pagination"]["page_count"], 3)
 
+    def test_delete_images_removes_record_and_local_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            images_dir = Path(tmp_dir) / "images"
+            image_path = images_dir / "2026" / "05" / "25" / "sample.png"
+            image_path.parent.mkdir(parents=True)
+            image_path.write_bytes(b"image-bytes")
+            records = [
+                {
+                    "id": "image-1",
+                    "record_id": "image-1",
+                    "url": "http://127.0.0.1:8000/images/2026/05/25/sample.png",
+                    "created_at": "2026-05-25 12:00:00",
+                },
+                {
+                    "id": "image-2",
+                    "record_id": "image-2",
+                    "url": "http://127.0.0.1:8000/images/2026/05/25/keep.png",
+                    "created_at": "2026-05-25 13:00:00",
+                },
+            ]
+
+            def save_image_records(next_records: list[dict[str, object]]) -> None:
+                records[:] = next_records
+
+            fake_storage = SimpleNamespace(
+                load_image_records=lambda: records,
+                save_image_records=save_image_records,
+            )
+            fake_config = SimpleNamespace(
+                images_dir=images_dir,
+                get_storage_backend=lambda: fake_storage,
+            )
+
+            with mock.patch.object(image_service, "config", fake_config):
+                result = image_service.delete_images(record_ids=["image-1"])
+
+        self.assertEqual(result["removed"], 1)
+        self.assertEqual(result["removed_records"], 1)
+        self.assertEqual(result["removed_files"], 1)
+        self.assertFalse(image_path.exists())
+        self.assertEqual([record["id"] for record in records], ["image-2"])
+
+    def test_delete_images_removes_file_without_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            images_dir = Path(tmp_dir) / "images"
+            image_path = images_dir / "2026" / "05" / "25" / "orphan.png"
+            image_path.parent.mkdir(parents=True)
+            image_path.write_bytes(b"image-bytes")
+            fake_storage = SimpleNamespace(
+                load_image_records=lambda: [],
+                save_image_records=lambda records: None,
+            )
+            fake_config = SimpleNamespace(
+                images_dir=images_dir,
+                get_storage_backend=lambda: fake_storage,
+            )
+
+            with mock.patch.object(image_service, "config", fake_config):
+                result = image_service.delete_images(
+                    urls=["http://127.0.0.1:8000/images/2026/05/25/orphan.png"]
+                )
+
+        self.assertEqual(result["removed"], 1)
+        self.assertEqual(result["removed_records"], 0)
+        self.assertEqual(result["removed_files"], 1)
+        self.assertFalse(image_path.exists())
+
     def test_record_image_result_inserts_without_loading_repository(self) -> None:
         repository = InsertOnlyImageRecordRepository()
         fake_config = SimpleNamespace(
