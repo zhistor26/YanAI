@@ -32,6 +32,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { editImage, fetchAccounts, fetchMe, generateImage, type Account } from "@/lib/api";
+import { resolveApiAssetUrl } from "@/lib/assets";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import {
   clearImageConversations,
@@ -62,6 +63,11 @@ const COMPOSER_GRID_LEFT_WIDTH = 300;
 const COMPOSER_GRID_GAP_WIDTH = 12;
 const COMPOSER_RESULTS_MIN_WIDTH = 520;
 const activeConversationQueueIds = new Set<string>();
+
+type PreparedReferenceImage = {
+  referenceImage: StoredReferenceImage;
+  file: File;
+};
 
 function getScopedStorageKey(baseKey: string, ownerKey: string) {
   return ownerKey ? `${baseKey}:${ownerKey}` : baseKey;
@@ -120,15 +126,48 @@ function dataUrlToFile(dataUrl: string, fileName: string, mimeType?: string) {
   return new File([bytes], fileName, { type: mimeType || matchedMimeType || "image/png" });
 }
 
-function buildReferenceImageFromResult(image: StoredImage, fileName: string): StoredReferenceImage | null {
+async function imageUrlToFile(url: string, fileName: string) {
+  const response = await fetch(resolveApiAssetUrl(url));
+  if (!response.ok) {
+    throw new Error(`读取生成图失败 (${response.status})`);
+  }
+  const blob = await response.blob();
+  const mimeType = blob.type || "image/png";
+  return new File([blob], fileName, { type: mimeType });
+}
+
+async function buildReferenceImageFromResult(
+  image: StoredImage,
+  fileName: string,
+): Promise<PreparedReferenceImage | null> {
+  if (image.url) {
+    try {
+      const file = await imageUrlToFile(image.url, fileName);
+      const referenceImage = {
+        name: file.name,
+        type: file.type || "image/png",
+        dataUrl: await readFileAsDataUrl(file),
+      };
+      return { referenceImage, file };
+    } catch (error) {
+      if (!image.b64_json) {
+        throw error;
+      }
+    }
+  }
+
   if (!image.b64_json) {
     return null;
   }
 
-  return {
+  const referenceImage = {
     name: fileName,
     type: "image/png",
     dataUrl: `data:image/png;base64,${image.b64_json}`,
+  };
+  return {
+    referenceImage,
+    file: dataUrlToFile(referenceImage.dataUrl, referenceImage.name, referenceImage.type),
   };
 }
 
@@ -769,25 +808,31 @@ function ImagePageContent({ session }: { session: StoredAuthSession }) {
   }, []);
 
   const handleContinueEdit = useCallback(
-    (conversationId: string, image: StoredImage | StoredReferenceImage) => {
-      const nextReferenceImage =
-        "dataUrl" in image
-          ? image
-          : buildReferenceImageFromResult(image, `conversation-${conversationId}-${Date.now()}.png`);
-      if (!nextReferenceImage) {
-        return;
-      }
+    async (conversationId: string, image: StoredImage | StoredReferenceImage) => {
+      try {
+        const preparedReference =
+          "dataUrl" in image
+            ? {
+                referenceImage: image,
+                file: dataUrlToFile(image.dataUrl, image.name, image.type),
+              }
+            : await buildReferenceImageFromResult(image, `conversation-${conversationId}-${Date.now()}.png`);
+        if (!preparedReference) {
+          toast.error("这张图没有可用于继续编辑的数据");
+          return;
+        }
 
-      setSelectedConversationId(conversationId);
-      setImageMode("edit");
-      setReferenceImages((prev) => [...prev, nextReferenceImage]);
-      setReferenceImageFiles((prev) => [
-        ...prev,
-        dataUrlToFile(nextReferenceImage.dataUrl, nextReferenceImage.name, nextReferenceImage.type),
-      ]);
-      setImagePrompt("");
-      textareaRef.current?.focus();
-      toast.success("已加入当前参考图，继续输入描述即可编辑");
+        setSelectedConversationId(conversationId);
+        setImageMode("edit");
+        setReferenceImages((prev) => [...prev, preparedReference.referenceImage]);
+        setReferenceImageFiles((prev) => [...prev, preparedReference.file]);
+        setImagePrompt("");
+        textareaRef.current?.focus();
+        toast.success("已加入当前参考图，继续输入描述即可编辑");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "读取生成图失败";
+        toast.error(message);
+      }
     },
     [],
   );
@@ -877,12 +922,17 @@ function ImagePageContent({ session }: { session: StoredAuthSession }) {
               throw new Error("未返回图片数据");
             }
 
-            const nextImage: StoredImage = {
-              id: pendingImage.id,
-              status: "success",
-              b64_json: first.b64_json,
-              url: first.url,
-            };
+            const nextImage: StoredImage = first.url
+              ? {
+                  id: pendingImage.id,
+                  status: "success",
+                  url: first.url,
+                }
+              : {
+                  id: pendingImage.id,
+                  status: "success",
+                  b64_json: first.b64_json,
+                };
 
             await updateConversation(
               conversationId,
@@ -1313,7 +1363,7 @@ function ImageStudioSidebar({
 
       <div className="border-t border-rose-100/70 p-3">
         <div className="rounded-lg bg-gradient-to-br from-white/80 to-rose-50/80 p-3">
-          <div className="text-sm text-stone-500">剩余额度</div>
+          <div className="text-sm text-stone-500">本地额度</div>
           <div className="mt-1 text-3xl font-bold tracking-tight text-stone-950">{availableQuota}</div>
         </div>
       </div>

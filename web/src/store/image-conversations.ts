@@ -106,13 +106,21 @@ export function getImageConversationOwnerKey(owner: ImageConversationOwner | nul
 }
 
 function normalizeStoredImage(image: StoredImage): StoredImage {
-  if (image.status === "loading" || image.status === "error" || image.status === "success") {
-    return image;
-  }
-  return {
+  const normalized: StoredImage = {
     ...image,
-    status: image.b64_json || image.url ? "success" : "loading",
+    status:
+      image.status === "loading" || image.status === "error" || image.status === "success"
+        ? image.status
+        : image.b64_json || image.url
+          ? "success"
+          : "loading",
   };
+  if (normalized.url && normalized.b64_json) {
+    const withoutBase64 = { ...normalized };
+    delete withoutBase64.b64_json;
+    return withoutBase64;
+  }
+  return normalized;
 }
 
 function normalizeReferenceImage(image: StoredReferenceImage): StoredReferenceImage {

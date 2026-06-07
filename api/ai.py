@@ -113,11 +113,14 @@ def create_router() -> APIRouter:
         )
         return count
 
-    def require_internal_pool_enabled() -> None:
+    def require_internal_pool_enabled(external_error: object = None) -> None:
         if not channel_service.is_internal_pool_enabled():
+            message = "internal account pool is disabled and no external channel completed the request"
+            if external_error:
+                message = f"{message}: {external_error}"
             raise HTTPException(
                 status_code=503,
-                detail={"error": "internal account pool is disabled and no external channel completed the request"},
+                detail={"error": message},
             )
 
     @router.get("/v1/models")
@@ -142,6 +145,13 @@ def create_router() -> APIRouter:
         payload = body.model_dump(mode="python")
         payload["base_url"] = resolve_image_base_url(request)
         payload["request_id"] = request_id
+        if identity.get("role") == "user":
+            user_id = str(identity.get("id") or "")
+            payload["_owner_user_id"] = user_id
+            payload["_personal_image_channel"] = auth_service.get_user_image_channel_config(
+                user_id,
+                include_api_key=True,
+            )
         call = LoggedCall(identity, "/v1/images/generations", body.model, "文生图", request_id=request_id)
         try:
             if not body.stream:
@@ -161,7 +171,7 @@ def create_router() -> APIRouter:
                     )
                     finalize_quota(quota_request_id, count)
                     return result
-            require_internal_pool_enabled()
+            require_internal_pool_enabled(payload.get("_channel_error"))
             result = await call.run(openai_v1_image_generations.handle, payload)
             count = 0
             if isinstance(result, dict):
@@ -222,6 +232,13 @@ def create_router() -> APIRouter:
             "base_url": resolve_image_base_url(request),
             "request_id": request_id,
         }
+        if identity.get("role") == "user":
+            user_id = str(identity.get("id") or "")
+            payload["_owner_user_id"] = user_id
+            payload["_personal_image_channel"] = auth_service.get_user_image_channel_config(
+                user_id,
+                include_api_key=True,
+            )
         call = LoggedCall(identity, "/v1/images/edits", model, "图生图", request_id=request_id)
         try:
             if not stream:
@@ -241,7 +258,7 @@ def create_router() -> APIRouter:
                     )
                     finalize_quota(quota_request_id, count)
                     return result
-            require_internal_pool_enabled()
+            require_internal_pool_enabled(payload.get("_channel_error"))
             result = await call.run(openai_v1_image_edit.handle, payload)
             count = 0
             if isinstance(result, dict):

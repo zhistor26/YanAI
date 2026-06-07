@@ -11,12 +11,14 @@ from typing import Any
 from curl_cffi.requests import Session
 
 from services.config import config
+from services.proxy_service import proxy_settings
 from services.repositories.base import RepositoryProvider
 from services.repositories.storage_adapter import RepositoryStorageAdapter
 from services.storage.base import StorageBackend
 from utils.model_catalog import DEFAULT_INTERNAL_MODELS
 
 INTERNAL_POOL_ENABLED_KEY = "internal_pool_enabled"
+PERSONAL_CHANNEL_ID_PREFIX = "personal_image_channel"
 
 
 def _now_iso() -> str:
@@ -57,6 +59,23 @@ def _requested_models(value: object) -> list[str]:
         if model and model not in seen:
             seen.add(model)
             result.append(model)
+    return result
+
+
+EXTERNAL_IMAGE_MODEL_ALIASES = {
+    "gpt-image-2": ["codex-gpt-image-2"],
+}
+
+
+def _dedupe_models(models: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in models:
+        model = _clean(item)
+        if not model or model in seen:
+            continue
+        seen.add(model)
+        result.append(model)
     return result
 
 
@@ -155,6 +174,47 @@ class ChannelService:
     def is_internal_pool_enabled(self) -> bool:
         return _bool(self.config_store.get().get(INTERNAL_POOL_ENABLED_KEY), True)
 
+    def _image_model_mappings(self) -> dict[str, str]:
+        defaults = {
+            "gpt-image-2": "gpt-5-5",
+            "codex-gpt-image-2": "codex-gpt-image-2",
+        }
+        raw = getattr(self.config_store, "image_model_mappings", None)
+        if raw is None:
+            raw = self.config_store.get().get("image_model_mappings")
+        if not isinstance(raw, dict):
+            return defaults
+        mappings = dict(defaults)
+        for key, value in raw.items():
+            source_model = _clean(key)
+            target_model = _clean(value)
+            if source_model and target_model:
+                mappings[source_model] = target_model
+        return mappings
+
+    def _external_model_candidates(self, model: str | None) -> list[str]:
+        requested = _clean(model)
+        if not requested:
+            return []
+        mapped = _clean(self._image_model_mappings().get(requested))
+        return _dedupe_models([requested, *EXTERNAL_IMAGE_MODEL_ALIASES.get(requested, []), mapped])
+
+    def _resolve_external_model_for_channel(
+            self,
+            channel: dict[str, object],
+            model: str | None,
+    ) -> str:
+        candidates = self._external_model_candidates(model)
+        channel_models = _normalize_models(channel.get("models"))
+        if not candidates:
+            return channel_models[0] if channel_models else ""
+        if not channel_models:
+            return candidates[0]
+        for candidate in candidates:
+            if candidate in channel_models:
+                return candidate
+        return ""
+
     def _internal_channel(self) -> dict[str, object]:
         return {
             "id": "internal_pool",
@@ -170,6 +230,61 @@ class ChannelService:
             "created_at": None,
             "updated_at": None,
         }
+
+    def _normalize_personal_channel(
+            self,
+            raw: object,
+            *,
+            owner_user_id: str = "",
+            require_enabled: bool = True,
+    ) -> dict[str, object] | None:
+        if not isinstance(raw, dict):
+            return None
+        if require_enabled and not _bool(raw.get("enabled"), False):
+            return None
+        channel = self._normalize({
+            **raw,
+            "id": f"{PERSONAL_CHANNEL_ID_PREFIX}:{_clean(owner_user_id) or 'current'}",
+            "name": _clean(raw.get("name")) or "个人生图渠道",
+            "type": "openai_image",
+            "weight": 1,
+            "priority": 100000,
+            "enabled": _bool(raw.get("enabled"), True),
+            "created_at": _now_iso(),
+            "updated_at": _now_iso(),
+        })
+        if channel is None:
+            return None
+        if not _clean(channel.get("base_url")) or not _clean(channel.get("api_key")):
+            return None
+        channel["_personal_channel"] = True
+        channel["_owner_user_id"] = _clean(owner_user_id)
+        return channel
+
+    def _enabled_personal_and_external_channels(
+            self,
+            model: str | None,
+            personal_channel: object = None,
+            *,
+            owner_user_id: str = "",
+    ) -> list[dict[str, object]]:
+        channels: list[dict[str, object]] = []
+        personal = self._normalize_personal_channel(
+            personal_channel,
+            owner_user_id=owner_user_id,
+            require_enabled=True,
+        )
+        if personal is not None and self._resolve_external_model_for_channel(personal, model):
+            channels.append(personal)
+        channels.extend(self._enabled_external_channels(model))
+        return channels
+
+    @staticmethod
+    def _channel_result_name(channel: dict[str, object]) -> str:
+        name = str(channel.get("name") or channel.get("id") or "").strip()
+        if channel.get("_personal_channel"):
+            return f"个人渠道/{name or 'personal'}"
+        return name or "external_channel"
 
     def list_channels(self, include_internal: bool = True) -> list[dict[str, object]]:
         with self._lock:
@@ -343,7 +458,11 @@ class ChannelService:
                 models = self._fetch_external_channel_models(channel)
             model_set = set(models)
             tested_models = requested_models or models
-            missing_models = [model for model in requested_models if model not in model_set]
+            missing_models = [
+                model
+                for model in requested_models
+                if not any(candidate in model_set for candidate in self._external_model_candidates(model))
+            ]
             ok = not missing_models
             return {
                 "ok": ok,
@@ -359,6 +478,76 @@ class ChannelService:
             return {
                 "ok": False,
                 "channel": self._internal_channel() if normalized_id == "internal_pool" else self._public(channel),
+                "models": [],
+                "model_count": 0,
+                "tested_models": requested_models,
+                "missing_models": requested_models,
+                "latency_ms": int((time.monotonic() - started_at) * 1000),
+                "error": str(exc),
+            }
+
+    def test_personal_channel_models(
+            self,
+            channel_config: object,
+            models: object = None,
+            *,
+            owner_user_id: str = "",
+    ) -> dict[str, object]:
+        requested_models = _requested_models(models)
+        started_at = time.monotonic()
+        channel = self._normalize_personal_channel(
+            channel_config,
+            owner_user_id=owner_user_id,
+            require_enabled=False,
+        )
+        if channel is None:
+            return {
+                "ok": False,
+                "channel": {
+                    "id": f"{PERSONAL_CHANNEL_ID_PREFIX}:{_clean(owner_user_id) or 'current'}",
+                    "name": "个人生图渠道",
+                    "type": "openai_image",
+                    "base_url": "",
+                    "models": [],
+                    "weight": 1,
+                    "priority": 0,
+                    "timeout": 60,
+                    "enabled": False,
+                    "has_api_key": False,
+                    "created_at": None,
+                    "updated_at": None,
+                },
+                "models": [],
+                "model_count": 0,
+                "tested_models": requested_models,
+                "missing_models": requested_models,
+                "latency_ms": int((time.monotonic() - started_at) * 1000),
+                "error": "personal image channel base_url and api_key are required",
+            }
+        try:
+            models = self._fetch_external_channel_models(channel)
+            model_set = set(models)
+            tested_models = requested_models or models
+            missing_models = [
+                model
+                for model in requested_models
+                if not any(candidate in model_set for candidate in self._external_model_candidates(model))
+            ]
+            ok = not missing_models
+            return {
+                "ok": ok,
+                "channel": self._public(channel),
+                "models": models,
+                "model_count": len(models),
+                "tested_models": tested_models,
+                "missing_models": missing_models,
+                "latency_ms": int((time.monotonic() - started_at) * 1000),
+                "error": "" if ok else f"models unavailable: {', '.join(missing_models)}",
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "channel": self._public(channel),
                 "models": [],
                 "model_count": 0,
                 "tested_models": requested_models,
@@ -390,7 +579,7 @@ class ChannelService:
             channels = [
                 channel
                 for channel in channels
-                if not channel.get("models") or model in (channel.get("models") or [])
+                if self._resolve_external_model_for_channel(channel, model)
             ]
         weighted: list[dict[str, object]] = []
         for channel in sorted(channels, key=lambda item: int(item.get("priority") or 0), reverse=True):
@@ -403,28 +592,46 @@ class ChannelService:
 
     def call_generation(self, payload: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
         model = _clean(payload.get("model")) or "gpt-image-2"
-        last_error = ""
-        for channel in self._enabled_external_channels(model):
+        errors: list[str] = []
+        for channel in self._enabled_personal_and_external_channels(
+                model,
+                payload.get("_personal_image_channel"),
+                owner_user_id=_clean(payload.get("_owner_user_id")),
+        ):
+            resolved_model = self._resolve_external_model_for_channel(channel, model)
+            routed_payload = {**payload, "model": resolved_model or model}
             try:
-                return self._call_generation(channel, payload), str(channel.get("name") or channel.get("id"))
+                return self._call_generation(channel, routed_payload), self._channel_result_name(channel)
             except Exception as exc:
-                last_error = str(exc)
-                print(f"[channel] generation failed channel={channel.get('name')} error={last_error}")
-        if last_error:
-            print(f"[channel] all external generation channels failed: {last_error}")
+                error = str(exc)
+                errors.append(f"{self._channel_result_name(channel)}: {error}")
+                print(f"[channel] generation failed channel={channel.get('name')} error={error}")
+        if errors:
+            message = "; ".join(errors)
+            print(f"[channel] all external generation channels failed: {message}")
+            payload["_channel_error"] = message
         return None
 
     def call_edit(self, payload: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
         model = _clean(payload.get("model")) or "gpt-image-2"
-        last_error = ""
-        for channel in self._enabled_external_channels(model):
+        errors: list[str] = []
+        for channel in self._enabled_personal_and_external_channels(
+                model,
+                payload.get("_personal_image_channel"),
+                owner_user_id=_clean(payload.get("_owner_user_id")),
+        ):
+            resolved_model = self._resolve_external_model_for_channel(channel, model)
+            routed_payload = {**payload, "model": resolved_model or model}
             try:
-                return self._call_edit(channel, payload), str(channel.get("name") or channel.get("id"))
+                return self._call_edit(channel, routed_payload), self._channel_result_name(channel)
             except Exception as exc:
-                last_error = str(exc)
-                print(f"[channel] edit failed channel={channel.get('name')} error={last_error}")
-        if last_error:
-            print(f"[channel] all external edit channels failed: {last_error}")
+                error = str(exc)
+                errors.append(f"{self._channel_result_name(channel)}: {error}")
+                print(f"[channel] edit failed channel={channel.get('name')} error={error}")
+        if errors:
+            message = "; ".join(errors)
+            print(f"[channel] all external edit channels failed: {message}")
+            payload["_channel_error"] = message
         return None
 
     def _call_generation(self, channel: dict[str, object], payload: dict[str, Any]) -> dict[str, Any]:
@@ -466,7 +673,7 @@ class ChannelService:
         return self._normalize_response(response, payload)
 
     def _session(self, channel: dict[str, object]) -> Session:
-        session = Session(verify=True)
+        session = Session(**proxy_settings.build_session_kwargs(verify=True))
         session.headers.update({
             "Authorization": f"Bearer {_clean(channel.get('api_key'))}",
             "Accept": "application/json",

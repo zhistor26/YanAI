@@ -136,6 +136,191 @@ class ModelServiceTest(unittest.TestCase):
             self.assertEqual(failed["tested_models"], ["remote-model"])
             self.assertIn("models unavailable", failed["error"])
 
+    def test_external_channel_matches_mapped_image_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            storage = JSONStorageBackend(Path(tmp_dir) / "accounts.json")
+            storage.save_channels(
+                [
+                    {
+                        "id": "channel-a",
+                        "name": "A",
+                        "base_url": "https://a.example",
+                        "api_key": "sk-test",
+                        "models": ["gpt-5-5"],
+                    }
+                ]
+            )
+            service = ChannelService(storage, FakeConfigStore())
+
+            self.assertTrue(service.has_external_channels("gpt-image-2"))
+
+    def test_generation_uses_mapped_channel_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            storage = JSONStorageBackend(Path(tmp_dir) / "accounts.json")
+            storage.save_channels(
+                [
+                    {
+                        "id": "channel-a",
+                        "name": "A",
+                        "base_url": "https://a.example",
+                        "api_key": "sk-test",
+                        "models": ["gpt-5-5"],
+                    }
+                ]
+            )
+            service = ChannelService(storage, FakeConfigStore())
+            seen: dict[str, object] = {}
+
+            def fake_generation(channel, payload):
+                seen["channel"] = channel.get("id")
+                seen["model"] = payload.get("model")
+                return {"created": 1, "data": [{"url": "https://a.example/image.png"}]}
+
+            service._call_generation = fake_generation  # type: ignore[method-assign]
+            routed = service.call_generation({"prompt": "draw", "model": "gpt-image-2", "n": 1})
+
+            self.assertIsNotNone(routed)
+            self.assertEqual(seen["channel"], "channel-a")
+            self.assertEqual(seen["model"], "gpt-5-5")
+            self.assertEqual(routed[1], "A")
+
+    def test_generation_prefers_external_image_alias_before_internal_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            storage = JSONStorageBackend(Path(tmp_dir) / "accounts.json")
+            storage.save_channels(
+                [
+                    {
+                        "id": "channel-a",
+                        "name": "A",
+                        "base_url": "https://a.example",
+                        "api_key": "sk-test",
+                        "models": ["gpt-5-5", "codex-gpt-image-2"],
+                    }
+                ]
+            )
+            service = ChannelService(storage, FakeConfigStore())
+            seen: dict[str, object] = {}
+
+            def fake_generation(channel, payload):
+                seen["model"] = payload.get("model")
+                return {"created": 1, "data": [{"url": "https://a.example/image.png"}]}
+
+            service._call_generation = fake_generation  # type: ignore[method-assign]
+            routed = service.call_generation({"prompt": "draw", "model": "gpt-image-2", "n": 1})
+
+            self.assertIsNotNone(routed)
+            self.assertEqual(seen["model"], "codex-gpt-image-2")
+
+    def test_personal_generation_channel_precedes_global_channels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            storage = JSONStorageBackend(Path(tmp_dir) / "accounts.json")
+            storage.save_channels(
+                [
+                    {
+                        "id": "channel-a",
+                        "name": "Global",
+                        "base_url": "https://global.example",
+                        "api_key": "sk-global",
+                        "models": ["gpt-image-2"],
+                    }
+                ]
+            )
+            service = ChannelService(storage, FakeConfigStore())
+            calls: list[str] = []
+
+            def fake_generation(channel, payload):
+                calls.append(str(channel.get("id")))
+                return {"created": 1, "data": [{"url": "https://personal.example/image.png"}]}
+
+            service._call_generation = fake_generation  # type: ignore[method-assign]
+            routed = service.call_generation(
+                {
+                    "prompt": "draw",
+                    "model": "gpt-image-2",
+                    "n": 1,
+                    "_owner_user_id": "user-a",
+                    "_personal_image_channel": {
+                        "enabled": True,
+                        "name": "Mine",
+                        "base_url": "https://personal.example",
+                        "api_key": "sk-personal",
+                        "models": ["gpt-image-2"],
+                    },
+                }
+            )
+
+            self.assertIsNotNone(routed)
+            self.assertEqual(calls, ["personal_image_channel:user-a"])
+            self.assertEqual(routed[1], "个人渠道/Mine")
+
+    def test_personal_generation_channel_falls_back_to_global_channel(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            storage = JSONStorageBackend(Path(tmp_dir) / "accounts.json")
+            storage.save_channels(
+                [
+                    {
+                        "id": "channel-a",
+                        "name": "Global",
+                        "base_url": "https://global.example",
+                        "api_key": "sk-global",
+                        "models": ["gpt-image-2"],
+                    }
+                ]
+            )
+            service = ChannelService(storage, FakeConfigStore())
+            calls: list[str] = []
+
+            def fake_generation(channel, payload):
+                channel_id = str(channel.get("id"))
+                calls.append(channel_id)
+                if channel_id.startswith("personal_image_channel:"):
+                    raise RuntimeError("personal channel down")
+                return {"created": 1, "data": [{"url": "https://global.example/image.png"}]}
+
+            service._call_generation = fake_generation  # type: ignore[method-assign]
+            routed = service.call_generation(
+                {
+                    "prompt": "draw",
+                    "model": "gpt-image-2",
+                    "n": 1,
+                    "_owner_user_id": "user-a",
+                    "_personal_image_channel": {
+                        "enabled": True,
+                        "name": "Mine",
+                        "base_url": "https://personal.example",
+                        "api_key": "sk-personal",
+                        "models": ["gpt-image-2"],
+                    },
+                }
+            )
+
+            self.assertIsNotNone(routed)
+            self.assertEqual(calls, ["personal_image_channel:user-a", "channel-a"])
+            self.assertEqual(routed[1], "Global")
+
+    def test_channel_model_test_accepts_mapped_requested_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            storage = JSONStorageBackend(Path(tmp_dir) / "accounts.json")
+            storage.save_channels(
+                [
+                    {
+                        "id": "channel-a",
+                        "name": "A",
+                        "base_url": "https://a.example",
+                        "api_key": "sk-test",
+                        "models": ["gpt-5-5"],
+                    }
+                ]
+            )
+            service = ChannelService(storage, FakeConfigStore())
+
+            service._fetch_external_channel_models = lambda channel: ["gpt-5-5"]  # type: ignore[method-assign]
+            result = service.test_channel_models("channel-a", ["gpt-image-2"])
+
+            self.assertIsNotNone(result)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["missing_models"], [])
+
     def test_update_pricing_persists_and_estimates_token_cost(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             storage = JSONStorageBackend(Path(tmp_dir) / "accounts.json")

@@ -12,7 +12,7 @@ from fastapi.responses import RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from api.support import require_admin, require_identity, resolve_image_base_url
-from services.auth_service import auth_service
+from services.auth_service import DEFAULT_USER_IMAGE_CHANNEL_MODELS, auth_service
 from services.channel_service import channel_service
 from services.config import config
 from services.image_service import collect_downloadable_images, delete_images, list_images
@@ -37,6 +37,19 @@ class VerificationCodeRequest(BaseModel):
 
 class ProfileUpdateRequest(BaseModel):
     name: str | None = None
+
+
+class UserImageChannelRequest(BaseModel):
+    enabled: bool = False
+    name: str = ""
+    base_url: str = ""
+    api_key: str = ""
+    models: list[str] | str = Field(default_factory=lambda: list(DEFAULT_USER_IMAGE_CHANNEL_MODELS))
+    timeout: int = 60
+
+
+class UserImageChannelTestRequest(UserImageChannelRequest):
+    test_models: list[str] = Field(default_factory=list)
 
 
 class WebDAVConfigRequest(BaseModel):
@@ -282,6 +295,70 @@ def create_router() -> APIRouter:
         if user is None:
             raise HTTPException(status_code=404, detail={"error": "user not found"})
         return {"user": user}
+
+    @router.get("/api/me/image-channel")
+    async def get_my_image_channel(authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        if identity.get("role") != "user":
+            raise HTTPException(status_code=403, detail={"error": "user permission required"})
+        try:
+            channel = auth_service.get_user_image_channel_config(str(identity.get("id") or ""))
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail={"error": str(exc)}) from exc
+        return {"channel": channel}
+
+    @router.post("/api/me/image-channel")
+    async def save_my_image_channel(body: UserImageChannelRequest, authorization: str | None = Header(default=None)):
+        identity = require_identity(authorization)
+        if identity.get("role") != "user":
+            raise HTTPException(status_code=403, detail={"error": "user permission required"})
+        user_id = str(identity.get("id") or "")
+        try:
+            channel = auth_service.save_user_image_channel_config(user_id, body.model_dump(mode="python"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        audit_service.add(
+            actor=identity,
+            action="me.image_channel.update",
+            resource="image_channel",
+            target_id=user_id,
+            detail={
+                "enabled": channel.get("enabled"),
+                "name": channel.get("name"),
+                "base_url": channel.get("base_url"),
+                "models": channel.get("models"),
+                "timeout": channel.get("timeout"),
+                "has_api_key": channel.get("has_api_key"),
+            },
+        )
+        return {"channel": channel, "user": auth_service.get_user(user_id)}
+
+    @router.post("/api/me/image-channel/models/test")
+    async def test_my_image_channel_models(
+            body: UserImageChannelTestRequest | None = None,
+            authorization: str | None = Header(default=None),
+    ):
+        identity = require_identity(authorization)
+        if identity.get("role") != "user":
+            raise HTTPException(status_code=403, detail={"error": "user permission required"})
+        user_id = str(identity.get("id") or "")
+        updates = {} if body is None else body.model_dump(exclude={"test_models"}, mode="python")
+        selected_models = [] if body is None else body.test_models
+        try:
+            channel_config = auth_service.merge_user_image_channel_config(
+                user_id,
+                updates,
+                include_api_key=True,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+        result = await run_in_threadpool(
+            channel_service.test_personal_channel_models,
+            channel_config,
+            selected_models,
+            owner_user_id=user_id,
+        )
+        return result
 
     @router.post("/api/me/redeem")
     async def redeem(body: RedeemRequest, authorization: str | None = Header(default=None)):

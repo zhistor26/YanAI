@@ -18,6 +18,8 @@ AuthRole = Literal["admin", "user"]
 
 _SESSION_DAYS = 30
 _PASSWORD_ITERATIONS = 210_000
+IMAGE_CHANNEL_CONFIG_KEY = "image_channel_config"
+DEFAULT_USER_IMAGE_CHANNEL_MODELS = ["gpt-image-2", "codex-gpt-image-2", "gpt-5-5"]
 
 
 def _now() -> datetime:
@@ -71,6 +73,70 @@ def _parse_time(value: object) -> datetime | None:
         return datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _clean_text(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _bool(value: object, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "enabled"}
+    return bool(value)
+
+
+def _normalize_channel_models(value: object) -> list[str]:
+    if isinstance(value, str):
+        candidates = value.replace(";", ",").replace("\n", ",").split(",")
+    elif isinstance(value, list):
+        candidates = value
+    else:
+        candidates = DEFAULT_USER_IMAGE_CHANNEL_MODELS
+    seen: set[str] = set()
+    models: list[str] = []
+    for item in candidates:
+        model = _clean_text(item)
+        if model and model not in seen:
+            seen.add(model)
+            models.append(model)
+    return models or list(DEFAULT_USER_IMAGE_CHANNEL_MODELS)
+
+
+def _normalize_user_image_channel_config(
+    raw: object,
+    current: object = None,
+    *,
+    include_api_key: bool = False,
+) -> dict[str, object]:
+    raw_config = raw if isinstance(raw, dict) else {}
+    current_config = current if isinstance(current, dict) else {}
+
+    def pick(key: str, default: object = "") -> object:
+        return raw_config[key] if key in raw_config else current_config.get(key, default)
+
+    api_key = _clean_text(raw_config.get("api_key")) if "api_key" in raw_config else ""
+    if not api_key:
+        api_key = _clean_text(current_config.get("api_key"))
+
+    try:
+        timeout = max(5, int(pick("timeout", 60) or 60))
+    except (TypeError, ValueError):
+        timeout = 60
+
+    normalized = {
+        "enabled": _bool(pick("enabled", False), False),
+        "name": _clean_text(pick("name", "")) or "个人生图渠道",
+        "base_url": _clean_text(pick("base_url", "")).rstrip("/"),
+        "models": _normalize_channel_models(pick("models", DEFAULT_USER_IMAGE_CHANNEL_MODELS)),
+        "timeout": timeout,
+    }
+    if include_api_key:
+        normalized["api_key"] = api_key
+    else:
+        normalized["has_api_key"] = bool(api_key)
+    return normalized
 
 
 class AuthService:
@@ -151,6 +217,10 @@ class AuthService:
             "linuxdo_username": self._clean(raw.get("linuxdo_username")) or None,
             "linuxdo_trust_level": int(raw.get("linuxdo_trust_level") or 0),
             "webdav_config": raw.get("webdav_config") if isinstance(raw.get("webdav_config"), dict) else {},
+            IMAGE_CHANNEL_CONFIG_KEY: _normalize_user_image_channel_config(
+                raw.get(IMAGE_CHANNEL_CONFIG_KEY),
+                include_api_key=True,
+            ),
             "created_at": self._clean(raw.get("created_at")) or _now_iso(),
             "updated_at": self._clean(raw.get("updated_at")) or _now_iso(),
             "last_login_at": self._clean(raw.get("last_login_at")) or None,
@@ -288,6 +358,10 @@ class AuthService:
             "linuxdo_id": user.get("linuxdo_id"),
             "linuxdo_username": user.get("linuxdo_username"),
             "linuxdo_trust_level": int(user.get("linuxdo_trust_level") or 0),
+            "image_channel": _normalize_user_image_channel_config(
+                user.get(IMAGE_CHANNEL_CONFIG_KEY),
+                include_api_key=False,
+            ),
             "image_count": int((stats or {}).get("image_count") or 0),
             "spent_quota": int((stats or {}).get("spent_quota") or int(user.get("quota_used") or 0)),
         }
@@ -546,6 +620,12 @@ class AuthService:
                 current["status"] = status
             if "quota" in updates and updates.get("quota") is not None:
                 current["quota"] = max(0, int(updates.get("quota") or 0))
+            if IMAGE_CHANNEL_CONFIG_KEY in updates and isinstance(updates.get(IMAGE_CHANNEL_CONFIG_KEY), dict):
+                current[IMAGE_CHANNEL_CONFIG_KEY] = _normalize_user_image_channel_config(
+                    updates.get(IMAGE_CHANNEL_CONFIG_KEY),
+                    current.get(IMAGE_CHANNEL_CONFIG_KEY),
+                    include_api_key=True,
+                )
             current["updated_at"] = _now_iso()
             user = self._normalize_user(current)
             if user is None:
@@ -553,6 +633,62 @@ class AuthService:
             self._users[index] = user
             self._save_users()
             return self._public_user(user)
+
+    def get_user_image_channel_config(self, user_id: str, *, include_api_key: bool = False) -> dict[str, object]:
+        with self._lock:
+            index = self._find_user_index_by_id(self._clean(user_id))
+            if index < 0:
+                raise ValueError("user not found")
+            return _normalize_user_image_channel_config(
+                self._users[index].get(IMAGE_CHANNEL_CONFIG_KEY),
+                include_api_key=include_api_key,
+            )
+
+    def merge_user_image_channel_config(
+        self,
+        user_id: str,
+        updates: dict[str, object],
+        *,
+        include_api_key: bool = False,
+    ) -> dict[str, object]:
+        with self._lock:
+            index = self._find_user_index_by_id(self._clean(user_id))
+            if index < 0:
+                raise ValueError("user not found")
+            normalized = _normalize_user_image_channel_config(
+                updates,
+                self._users[index].get(IMAGE_CHANNEL_CONFIG_KEY),
+                include_api_key=True,
+            )
+            if include_api_key:
+                return normalized
+            return _normalize_user_image_channel_config(normalized, include_api_key=False)
+
+    def save_user_image_channel_config(self, user_id: str, updates: dict[str, object]) -> dict[str, object]:
+        normalized_id = self._clean(user_id)
+        with self._lock:
+            index = self._find_user_index_by_id(normalized_id)
+            if index < 0:
+                raise ValueError("user not found")
+            normalized = _normalize_user_image_channel_config(
+                updates,
+                self._users[index].get(IMAGE_CHANNEL_CONFIG_KEY),
+                include_api_key=True,
+            )
+            if _bool(normalized.get("enabled")):
+                if not _clean_text(normalized.get("base_url")):
+                    raise ValueError("base_url is required when personal image channel is enabled")
+                if not _clean_text(normalized.get("api_key")):
+                    raise ValueError("api_key is required when personal image channel is enabled")
+            current = dict(self._users[index])
+            current[IMAGE_CHANNEL_CONFIG_KEY] = normalized
+            current["updated_at"] = _now_iso()
+            user = self._normalize_user(current)
+            if user is None:
+                raise ValueError("user payload is invalid")
+            self._users[index] = user
+            self._save_users()
+            return _normalize_user_image_channel_config(user.get(IMAGE_CHANNEL_CONFIG_KEY), include_api_key=False)
 
     def delete_user(self, user_id: str) -> bool:
         normalized_id = self._clean(user_id)

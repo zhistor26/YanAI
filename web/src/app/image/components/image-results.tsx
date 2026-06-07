@@ -225,18 +225,19 @@ export function ImageResults({
           id: `${turn.id}-reference-${index}`,
           src: image.dataUrl,
         }));
-        const successfulTurnImages = turn.images.flatMap((image) =>
-          image.status === "success" && (image.b64_json || image.url)
+        const successfulTurnImages = turn.images.flatMap((image) => {
+          const imageSrc = getStoredImageSrc(image);
+          return image.status === "success" && imageSrc
             ? [
                 {
                   id: image.id,
-                  src: image.b64_json ? `data:image/png;base64,${image.b64_json}` : image.url || "",
-                  sizeLabel: image.b64_json ? formatBase64ImageSize(image.b64_json) : undefined,
+                  src: imageSrc,
+                  sizeLabel: image.b64_json && !image.url ? formatBase64ImageSize(image.b64_json) : undefined,
                   dimensions: imageDimensions[image.id],
                 },
               ]
-            : [],
-        );
+            : [];
+        });
 
         return (
           <section key={turn.id} className="overflow-hidden rounded-lg border border-white/70 bg-white/46 shadow-sm">
@@ -318,8 +319,8 @@ export function ImageResults({
 
                 if (image.status === "success" && (image.b64_json || image.url)) {
                   const currentIndex = successfulTurnImages.findIndex((item) => item.id === image.id);
-                  const imageSrc = image.b64_json ? `data:image/png;base64,${image.b64_json}` : image.url || "";
-                  const sizeLabel = image.b64_json ? formatBase64ImageSize(image.b64_json) : "";
+                  const imageSrc = getStoredImageSrc(image);
+                  const sizeLabel = image.b64_json && !image.url ? formatBase64ImageSize(image.b64_json) : "";
                   const dimensions = imageDimensions[image.id];
                   const imageMeta = [sizeLabel, dimensions].filter(Boolean).join(" · ");
 
@@ -340,6 +341,8 @@ export function ImageResults({
                           src={imageSrc}
                           alt={`Generated result ${index + 1}`}
                           className="h-full w-full object-cover transition duration-200 group-hover:brightness-90"
+                          loading="lazy"
+                          decoding="async"
                           onLoad={(event) => {
                             updateImageDimensions(
                               image.id,
@@ -434,6 +437,16 @@ function getImageAspectClass(size: string) {
   if (size === "4:3") return "aspect-[4/3]";
   if (size === "3:4") return "aspect-[3/4]";
   return "aspect-[4/3]";
+}
+
+function getStoredImageSrc(image: StoredImage) {
+  if (image.url) {
+    return resolveApiAssetUrl(image.url);
+  }
+  if (image.b64_json) {
+    return `data:image/png;base64,${image.b64_json}`;
+  }
+  return "";
 }
 
 function findPromptPreview(source: EmptyStatePromptSource, items: PromptLibraryItem[]) {

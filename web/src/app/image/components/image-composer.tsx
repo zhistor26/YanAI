@@ -985,7 +985,7 @@ export function ImageComposer({
             <div className="mt-1 text-sm font-bold text-stone-950">{Math.max(1, Math.min(10, Number(imageCount) || 1))} / 最多 10</div>
           </div>
           <div>
-            <div className="text-xs text-stone-500">剩余额度</div>
+            <div className="text-xs text-stone-500">本地额度</div>
             <div className="mt-1 text-sm font-bold text-stone-950">{availableQuota}</div>
           </div>
           <div>
@@ -1295,7 +1295,7 @@ export function ImageComposer({
                     </Button>
                   )}
                   <div className="inline-flex h-9 items-center justify-center rounded-lg bg-rose-50 px-3 text-xs font-medium text-stone-600">
-                    <span className="mr-1">额度</span>{availableQuota}
+                    <span className="mr-1">本地额度</span>{availableQuota}
                   </div>
                   {activeTaskCount > 0 && (
                     <div className="col-span-2 flex h-9 items-center justify-center gap-1.5 rounded-lg bg-amber-50 px-3 text-xs font-medium text-amber-700">

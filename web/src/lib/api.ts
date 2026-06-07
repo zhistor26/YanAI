@@ -286,6 +286,29 @@ export type CurrentUser = {
   created_at?: string | null;
   updated_at?: string | null;
   last_login_at?: string | null;
+  image_channel?: UserImageChannel;
+};
+
+export type UserImageChannel = {
+  enabled: boolean;
+  name: string;
+  base_url: string;
+  models: string[];
+  timeout: number;
+  has_api_key: boolean;
+};
+
+export type UserImageChannelPayload = {
+  enabled: boolean;
+  name: string;
+  base_url: string;
+  api_key?: string;
+  models: string[] | string;
+  timeout: number;
+};
+
+export type UserImageChannelModelTestPayload = UserImageChannelPayload & {
+  test_models?: string[];
 };
 
 export type RegisterOptions = {
@@ -407,6 +430,24 @@ export async function updateMyProfile(payload: { name?: string }) {
   });
 }
 
+export async function fetchMyImageChannel() {
+  return httpRequest<{ channel: UserImageChannel }>("/api/me/image-channel");
+}
+
+export async function updateMyImageChannel(payload: UserImageChannelPayload) {
+  return httpRequest<{ channel: UserImageChannel; user: CurrentUser }>("/api/me/image-channel", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function testMyImageChannelModels(payload: UserImageChannelModelTestPayload) {
+  return httpRequest<ChannelModelTestResult>("/api/me/image-channel/models/test", {
+    method: "POST",
+    body: payload,
+  });
+}
+
 export async function redeemMyCode(code: string) {
   return httpRequest<{ user: CurrentUser; redeem_code: RedeemCode }>("/api/me/redeem", {
     method: "POST",
@@ -474,7 +515,7 @@ export async function generateImage(prompt: string, model?: ImageModel, size?: s
         ...(model ? { model } : {}),
         ...(size ? { size } : {}),
         n: 1,
-        response_format: "b64_json",
+        response_format: "url",
       },
     },
   );
@@ -495,6 +536,7 @@ export async function editImage(files: File | File[], prompt: string, model?: Im
     formData.append("size", size);
   }
   formData.append("n", "1");
+  formData.append("response_format", "url");
 
   return httpRequest<ImageResponse>(
     "/v1/images/edits",
