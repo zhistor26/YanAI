@@ -1,0 +1,33 @@
+package: cloud.lazycat.app.yanai
+version: 1.0.7
+name: 颜AI
+description: >-
+  懒猫微服图片创作应用。平台免密登录，支持参考图与生成图通过懒猫网盘打开与保存，
+  数据持久化于 /lzcapp/var/data。
+author: zhistor
+license: MIT
+homepage: https://github.com/zhistor26/YanAI
+permissions:
+  required:
+    - net.internet
+    - document.read
+    - document.write
+    - media.read
+    - media.write
+locales:
+  zh-CN:
+    name: 颜AI
+    description: >-
+      懒猫微服图片创作应用。从启动器打开即可使用，平台账号自动登录，无需手输密码；
+      支持懒猫网盘打开参考图与保存图片；数据存于 /lzcapp/var/data。
+    usage: >-
+      从启动器打开即可使用。安装时填写 OpenAI 兼容图片 API 地址与 Key。
+      上传参考图或保存图片时可选「懒猫网盘」。数据持久化于 /lzcapp/var/data。
+  en-US:
+    name: YanAI
+    description: >-
+      LazyCat image studio with passwordless platform login and LazyCat Drive integration.
+      Data persists under /lzcapp/var/data.
+    usage: >-
+      Open from the launcher. Configure an OpenAI-compatible image API URL and key during install.
+      Use LazyCat Drive when picking reference images or saving outputs.

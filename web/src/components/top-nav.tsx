@@ -5,12 +5,9 @@ import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
   BadgeDollarSign,
-  Boxes,
   FileText,
-  Gift,
   Image,
   Images,
-  KeyRound,
   LogOut,
   PenLine,
   Settings,
@@ -31,25 +28,21 @@ type NavItem = {
   icon: LucideIcon;
 };
 
-const adminNavItems = [
-  { href: "/image", label: "画图", icon: Sparkles },
-  { href: "/users", label: "用户管理", icon: Users },
-  { href: "/accounts", label: "账号池管理", icon: Boxes },
-  { href: "/register", label: "注册机", icon: KeyRound },
-  { href: "/prompt-manager", label: "提示词管理", icon: PenLine },
-  { href: "/image-manager", label: "图片管理", icon: Images },
-  { href: "/channels", label: "渠道管理", icon: Waypoints },
-  { href: "/models", label: "模型管理", icon: BadgeDollarSign },
-  { href: "/redeem-codes", label: "兑换码", icon: Gift },
-  { href: "/logs", label: "日志", icon: FileText },
-  { href: "/settings", label: "设置", icon: Settings },
-] satisfies NavItem[];
-
-const userNavItems = [
+const sharedNavItems = [
   { href: "/image", label: "画图", icon: Sparkles },
   { href: "/my-images", label: "我的图片", icon: Image },
   { href: "/prompt-manager", label: "我的提示词", icon: PenLine },
   { href: "/profile", label: "个人中心", icon: User },
+] satisfies NavItem[];
+
+const adminNavItems = [
+  ...sharedNavItems,
+  { href: "/channels", label: "渠道管理", icon: Waypoints },
+  { href: "/models", label: "模型管理", icon: BadgeDollarSign },
+  { href: "/image-manager", label: "图片管理", icon: Images },
+  { href: "/users", label: "用户管理", icon: Users },
+  { href: "/logs", label: "日志", icon: FileText },
+  { href: "/settings", label: "设置", icon: Settings },
 ] satisfies NavItem[];
 
 export function TopNav() {
@@ -84,7 +77,7 @@ export function TopNav() {
     return null;
   }
 
-  const navItems = session.role === "admin" ? adminNavItems : userNavItems;
+  const navItems = session.role === "admin" ? adminNavItems : sharedNavItems;
   const roleLabel = session.role === "admin" ? "管理员" : "个人用户";
 
   return (

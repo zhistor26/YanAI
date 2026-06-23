@@ -1,18 +1,20 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Clock3, Copy, ImageIcon, LoaderCircle, Share2, Sparkles } from "lucide-react";
+import { Clock3, Copy, Download, ImageIcon, LoaderCircle, Share2, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { createPromptShare, fetchPromptLibrary, type PromptLibraryItem, type PromptLibraryPayload } from "@/lib/api";
 import { resolveApiAssetUrl } from "@/lib/assets";
+import { saveStoredImageWithToast } from "@/lib/save-image";
 import { cn } from "@/lib/utils";
 import type { ImageConversation, ImageTurnStatus, StoredImage, StoredReferenceImage } from "@/store/image-conversations";
 
 export type ImageLightboxItem = {
   id: string;
   src: string;
+  fileName?: string;
   sizeLabel?: string;
   dimensions?: string;
 };
@@ -225,13 +227,14 @@ export function ImageResults({
           id: `${turn.id}-reference-${index}`,
           src: image.dataUrl,
         }));
-        const successfulTurnImages = turn.images.flatMap((image) => {
+        const successfulTurnImages = turn.images.flatMap((image, imageIndex) => {
           const imageSrc = getStoredImageSrc(image);
           return image.status === "success" && imageSrc
             ? [
                 {
                   id: image.id,
                   src: imageSrc,
+                  fileName: `${turn.id}-${imageIndex + 1}.png`,
                   sizeLabel: image.b64_json && !image.url ? formatBase64ImageSize(image.b64_json) : undefined,
                   dimensions: imageDimensions[image.id],
                 },
@@ -357,15 +360,28 @@ export function ImageResults({
                           <span>结果 {index + 1}</span>
                           {imageMeta ? <span className="ml-2 text-stone-400">{imageMeta}</span> : null}
                         </div>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="rounded-lg border-rose-100 bg-white/85 text-stone-700 hover:bg-white"
-                          onClick={() => onContinueEdit(selectedConversation.id, image)}
-                        >
-                          <Sparkles className="size-4" />
-                          编辑
-                        </Button>
+                        <div className="flex shrink-0 items-center gap-1.5">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="rounded-lg border-rose-100 bg-white/85 px-2.5 text-stone-700 hover:bg-white"
+                            onClick={() => {
+                              void saveStoredImageWithToast(image, `${turn.id}-${index + 1}.png`);
+                            }}
+                          >
+                            <Download className="size-4" />
+                            保存
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="rounded-lg border-rose-100 bg-white/85 text-stone-700 hover:bg-white"
+                            onClick={() => onContinueEdit(selectedConversation.id, image)}
+                          >
+                            <Sparkles className="size-4" />
+                            编辑
+                          </Button>
+                        </div>
                       </div>
                     </div>
                   );

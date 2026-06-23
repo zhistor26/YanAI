@@ -357,6 +357,83 @@ class ImageServiceTests(unittest.TestCase):
         self.assertEqual(downloads[0]["id"], "image-owned")
         self.assertEqual(downloads[0]["path"], owned_path)
 
+    def test_record_image_result_persists_external_url(self) -> None:
+        image_bytes = b"external-image-bytes"
+        repository = InsertOnlyImageRecordRepository()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            images_dir = Path(tmp_dir) / "images"
+            fake_config = SimpleNamespace(
+                images_dir=images_dir,
+                base_url="http://127.0.0.1:8000",
+                cleanup_old_images=lambda: 0,
+                get_repository_provider=lambda: SimpleNamespace(image_records=repository),
+            )
+            mock_response = mock.Mock()
+            mock_response.content = image_bytes
+            mock_response.raise_for_status = mock.Mock()
+            result = {
+                "data": [{"url": "https://cdn.example.com/image.png"}],
+            }
+
+            with (
+                mock.patch.object(image_service, "config", fake_config),
+                mock.patch.object(conversation, "config", fake_config),
+                mock.patch.object(conversation, "china_now_text", return_value="2026-05-29 12:00:00"),
+                mock.patch("services.image_service.requests.get", return_value=mock_response) as get_mock,
+            ):
+                created = image_service.record_image_result(
+                    {"id": "user-a", "role": "user", "email": "user@example.com"},
+                    result,
+                    prompt="prompt",
+                    mode="generate",
+                    model="gpt-image-2",
+                )
+
+            get_mock.assert_called_once_with("https://cdn.example.com/image.png", timeout=60)
+            self.assertEqual(len(created), 1)
+            stored_url = str(created[0]["url"])
+            self.assertTrue(stored_url.startswith("/images/"))
+            self.assertEqual(result["data"][0]["url"], stored_url)
+            self.assertEqual(str(result["data"][0].get("record_id") or ""), str(created[0]["record_id"]))
+            self.assertTrue((images_dir / stored_url.removeprefix("/images/")).is_file())
+
+    def test_record_image_result_persists_b64_json(self) -> None:
+        import base64
+
+        image_bytes = b"b64-image-bytes"
+        repository = InsertOnlyImageRecordRepository()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            images_dir = Path(tmp_dir) / "images"
+            fake_config = SimpleNamespace(
+                images_dir=images_dir,
+                base_url="http://127.0.0.1:8000",
+                cleanup_old_images=lambda: 0,
+                get_repository_provider=lambda: SimpleNamespace(image_records=repository),
+            )
+            result = {
+                "data": [{"b64_json": base64.b64encode(image_bytes).decode("ascii")}],
+            }
+
+            with (
+                mock.patch.object(image_service, "config", fake_config),
+                mock.patch.object(conversation, "config", fake_config),
+                mock.patch.object(conversation, "china_now_text", return_value="2026-05-29 12:00:00"),
+            ):
+                created = image_service.record_image_result(
+                    {"id": "user-a", "role": "user", "email": "user@example.com"},
+                    result,
+                    prompt="prompt",
+                    mode="generate",
+                    model="gpt-image-2",
+                )
+
+            self.assertEqual(len(created), 1)
+            stored_url = str(created[0]["url"])
+            self.assertTrue(stored_url.startswith("/images/"))
+            self.assertEqual(result["data"][0]["url"], stored_url)
+            self.assertEqual(str(result["data"][0].get("record_id") or ""), str(created[0]["record_id"]))
+            self.assertTrue((images_dir / stored_url.removeprefix("/images/")).is_file())
+
     def test_record_image_result_inserts_without_loading_repository(self) -> None:
         repository = InsertOnlyImageRecordRepository()
         fake_config = SimpleNamespace(
@@ -395,11 +472,7 @@ class ImageServiceTests(unittest.TestCase):
 
             with (
                 mock.patch.object(conversation, "config", fake_config),
-                mock.patch.object(
-                    conversation.time,
-                    "strftime",
-                    side_effect=lambda fmt: {"%Y": "2026", "%m": "05", "%d": "29"}[fmt],
-                ),
+                mock.patch.object(conversation, "china_now_text", return_value="2026-05-29 12:00:00"),
             ):
                 first = conversation.save_image_bytes(b"same-image")
                 second = conversation.save_image_bytes(b"same-image")

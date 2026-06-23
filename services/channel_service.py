@@ -83,6 +83,22 @@ EXTERNAL_IMAGE_RATIO_PROMPT_HINTS = {
     "3:4": "输出为 3:4 比例，纵向构图，适合人物肖像或竖向场景。",
 }
 
+ASYNC_VIDEOS_CHANNEL_TYPE = "async_videos"
+ASYNC_VIDEOS_POLL_INTERVAL_SECS = 3
+ASYNC_VIDEOS_MIN_TIMEOUT_SECS = 180
+
+PIXEL_SIZE_TO_ASPECT_RATIO = {
+    "1024x1024": "1:1",
+    "1536x1024": "16:9",
+    "1024x1536": "9:16",
+    "1792x1024": "16:9",
+    "1024x1792": "9:16",
+}
+
+SUPPORTED_ASPECT_RATIOS = {
+    "1:1", "5:4", "9:16", "21:9", "16:9", "3:2", "4:3", "4:5", "3:4", "2:3",
+}
+
 
 def _dedupe_models(models: list[str]) -> list[str]:
     seen: set[str] = set()
@@ -115,6 +131,44 @@ def _normalize_external_image_request(prompt: object, size: object) -> tuple[str
             normalized_prompt = f"{normalized_prompt}\n\n{hint}"
         return normalized_prompt, mapped_size
     return normalized_prompt, normalized_size
+
+
+def _is_async_videos_channel(channel: dict[str, object]) -> bool:
+    return _clean(channel.get("type")).lower() == ASYNC_VIDEOS_CHANNEL_TYPE
+
+
+def _size_to_aspect_ratio(size: object) -> str:
+    normalized = _clean(size).lower()
+    if not normalized or normalized == "auto":
+        return "1:1"
+    if normalized in SUPPORTED_ASPECT_RATIOS:
+        return normalized
+    mapped = PIXEL_SIZE_TO_ASPECT_RATIO.get(normalized)
+    if mapped:
+        return mapped
+    mapped = EXTERNAL_IMAGE_RATIO_SIZE_ALIASES.get(normalized)
+    if mapped:
+        return PIXEL_SIZE_TO_ASPECT_RATIO.get(mapped, "1:1")
+    return "1:1"
+
+
+def _encode_async_videos_image(image: object) -> str:
+    if not isinstance(image, tuple) or len(image) != 3:
+        return ""
+    data, _filename, content_type = image
+    if not isinstance(data, (bytes, bytearray)) or not data:
+        return ""
+    mime = _clean(content_type) or "image/png"
+    encoded = base64.b64encode(bytes(data)).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
+
+
+def _async_videos_timeout_secs(channel: dict[str, object]) -> int:
+    try:
+        configured = int(channel.get("timeout") or 60)
+    except (TypeError, ValueError):
+        configured = 60
+    return max(ASYNC_VIDEOS_MIN_TIMEOUT_SECS, configured)
 
 
 def _response_preview(response, limit: int = 300) -> str:
@@ -154,7 +208,7 @@ class ChannelService:
         channel_id = _clean(raw.get("id")) or uuid.uuid4().hex[:12]
         name = _clean(raw.get("name")) or "OpenAI 图片渠道"
         channel_type = _clean(raw.get("type")) or "openai_image"
-        if channel_type != "openai_image":
+        if channel_type not in {"openai_image", ASYNC_VIDEOS_CHANNEL_TYPE}:
             channel_type = "openai_image"
         base_url = _clean(raw.get("base_url")).rstrip("/")
         api_key = _clean(raw.get("api_key"))
@@ -306,7 +360,7 @@ class ChannelService:
             **raw,
             "id": f"{PERSONAL_CHANNEL_ID_PREFIX}:{_clean(owner_user_id) or 'current'}",
             "name": _clean(raw.get("name")) or "个人生图渠道",
-            "type": "openai_image",
+            "type": _clean(raw.get("type")) or "openai_image",
             "weight": 1,
             "priority": 100000,
             "enabled": _bool(raw.get("enabled"), True),
@@ -780,6 +834,8 @@ class ChannelService:
         return None
 
     def _call_generation(self, channel: dict[str, object], payload: dict[str, Any]) -> dict[str, Any]:
+        if _is_async_videos_channel(channel):
+            return self._call_async_videos(channel, payload)
         prompt, size = _normalize_external_image_request(payload.get("prompt"), payload.get("size"))
         body = {
             key: value
@@ -800,6 +856,8 @@ class ChannelService:
         return self._normalize_response(response, payload)
 
     def _call_edit(self, channel: dict[str, object], payload: dict[str, Any]) -> dict[str, Any]:
+        if _is_async_videos_channel(channel):
+            return self._call_async_videos(channel, payload)
         prompt, size = _normalize_external_image_request(payload.get("prompt"), payload.get("size"))
         form_data = {
             "prompt": prompt or "",
@@ -833,6 +891,95 @@ class ChannelService:
         finally:
             multipart.close()
         return self._normalize_response(response, payload)
+
+    def _call_async_videos(self, channel: dict[str, object], payload: dict[str, Any]) -> dict[str, Any]:
+        prompt, size = _normalize_external_image_request(payload.get("prompt"), payload.get("size"))
+        if not _clean(prompt):
+            raise RuntimeError("prompt is required")
+        model = _clean(payload.get("model")) or (channel.get("models") or ["gpt-image-2"])[0]
+        aspect_ratio = _size_to_aspect_ratio(size or payload.get("size"))
+        try:
+            count = max(1, min(4, int(payload.get("n") or 1)))
+        except (TypeError, ValueError):
+            count = 1
+
+        reference_images = [
+            encoded
+            for encoded in (_encode_async_videos_image(image) for image in (payload.get("images") or []))
+            if encoded
+        ][:5]
+
+        data_items: list[dict[str, str]] = []
+        for _ in range(count):
+            body: dict[str, object] = {
+                "model": model,
+                "prompt": prompt,
+                "aspect_ratio": aspect_ratio,
+            }
+            if reference_images:
+                body["images"] = reference_images
+            task_id = self._submit_async_videos_task(channel, body)
+            result_url = self._poll_async_videos_task(channel, task_id)
+            data_items.append({"url": result_url})
+
+        return {
+            "created": int(datetime.now().timestamp()),
+            "data": data_items,
+        }
+
+    def _submit_async_videos_task(self, channel: dict[str, object], body: dict[str, object]) -> str:
+        response = self._session(channel).post(
+            self._openai_compatible_url(channel, "/v1/videos"),
+            json=body,
+            timeout=min(60, _async_videos_timeout_secs(channel)),
+        )
+        if not response.ok:
+            raise RuntimeError(f"HTTP {response.status_code}: {_response_preview(response)}")
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("async videos response is invalid")
+        task_id = _clean(payload.get("id") or payload.get("task_id"))
+        if not task_id:
+            raise RuntimeError("async videos response missing task id")
+        return task_id
+
+    def _poll_async_videos_task(self, channel: dict[str, object], task_id: str) -> str:
+        deadline = time.monotonic() + _async_videos_timeout_secs(channel)
+        last_status = ""
+        last_error = ""
+        while time.monotonic() < deadline:
+            response = self._session(channel).get(
+                self._openai_compatible_url(channel, f"/v1/videos/{task_id}"),
+                timeout=min(60, _async_videos_timeout_secs(channel)),
+            )
+            if not response.ok:
+                raise RuntimeError(f"HTTP {response.status_code}: {_response_preview(response)}")
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise RuntimeError("async videos poll response is invalid")
+
+            status = _clean(payload.get("status")).lower()
+            last_status = status or last_status
+            if status == "completed":
+                result_url = _clean(payload.get("url") or payload.get("video_url"))
+                if not result_url:
+                    raise RuntimeError("async videos task completed without image url")
+                return result_url
+            if status == "failed":
+                error = payload.get("error")
+                if isinstance(error, dict):
+                    last_error = _clean(error.get("message")) or _clean(error.get("code"))
+                if not last_error:
+                    last_error = "async videos task failed"
+                raise RuntimeError(last_error)
+
+            time.sleep(ASYNC_VIDEOS_POLL_INTERVAL_SECS)
+
+        if last_error:
+            raise RuntimeError(last_error)
+        raise RuntimeError(
+            f"async videos task timed out after {_async_videos_timeout_secs(channel)}s (last status: {last_status or 'unknown'})"
+        )
 
     def _session(self, channel: dict[str, object]) -> Session:
         session = Session(**proxy_settings.build_session_kwargs(verify=True))

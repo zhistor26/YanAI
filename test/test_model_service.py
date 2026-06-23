@@ -633,6 +633,74 @@ class ModelServiceTest(unittest.TestCase):
         self.assertEqual(pricing["output_price_per_million"], 40)
         self.assertEqual(pricing["completion_ratio"], 8)
 
+    def test_async_videos_channel_maps_size_to_aspect_ratio(self) -> None:
+        from services.channel_service import _size_to_aspect_ratio
+
+        self.assertEqual(_size_to_aspect_ratio("9:16"), "9:16")
+        self.assertEqual(_size_to_aspect_ratio("1024x1536"), "9:16")
+        self.assertEqual(_size_to_aspect_ratio("1024x1024"), "1:1")
+
+    def test_async_videos_generation_polls_until_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            storage = JSONStorageBackend(Path(tmp_dir) / "accounts.json")
+            service = ChannelService(storage, FakeConfigStore())
+            channel = {
+                "id": "channel-async",
+                "name": "Async",
+                "type": "async_videos",
+                "base_url": "https://example.test",
+                "api_key": "sk-test",
+                "models": ["gpt-image-2"],
+                "timeout": 180,
+            }
+
+            calls: dict[str, object] = {}
+
+            class FakeSubmitResponse:
+                ok = True
+                status_code = 200
+                text = ""
+
+                def json(self):
+                    return {"id": "task_123", "status": "queued"}
+
+            poll_states = iter([
+                {"status": "queued"},
+                {"status": "completed", "url": "https://example.test/output.png"},
+            ])
+
+            class FakePollResponse:
+                ok = True
+                status_code = 200
+                text = ""
+
+                def __init__(self, payload):
+                    self._payload = payload
+
+                def json(self):
+                    return self._payload
+
+            class FakeSession:
+                def post(self, url, **kwargs):
+                    calls["post"] = {"url": url, "kwargs": kwargs}
+                    return FakeSubmitResponse()
+
+                def get(self, url, **kwargs):
+                    payload = next(poll_states)
+                    return FakePollResponse(payload)
+
+            service._session = lambda _channel: FakeSession()  # type: ignore[method-assign]
+            with mock.patch("services.channel_service.time.sleep", lambda _secs: None):
+                result = service._call_async_videos(
+                    channel,
+                    {"prompt": "sunset", "model": "gpt-image-2", "size": "9:16", "n": 1},
+                )
+
+            self.assertEqual(result["data"][0]["url"], "https://example.test/output.png")
+            post_body = calls["post"]["kwargs"]["json"]  # type: ignore[index]
+            self.assertEqual(post_body["aspect_ratio"], "9:16")
+            self.assertEqual(post_body["model"], "gpt-image-2")
+
 
 if __name__ == "__main__":
     unittest.main()

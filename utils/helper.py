@@ -27,6 +27,35 @@ def is_image_chat_request(body: dict[str, object]) -> bool:
     return isinstance(modalities, list) and "image" in {str(item or "").strip().lower() for item in modalities}
 
 
+_UPSTREAM_BODY_LOG_LIMIT = 500
+
+
+class UpstreamHTTPError(RuntimeError):
+    """HTTP non-2xx response from an upstream service."""
+
+    def __init__(
+        self,
+        context: str,
+        status_code: int,
+        body: Any,
+        retry_after: int | None = None,
+    ) -> None:
+        self.context = context
+        self.status_code = status_code
+        self.body = body
+        self.retry_after = retry_after
+        if isinstance(body, (dict, list)):
+            try:
+                body_text = json.dumps(body, ensure_ascii=False)
+            except (TypeError, ValueError):
+                body_text = repr(body)
+        else:
+            body_text = str(body)
+        if len(body_text) > _UPSTREAM_BODY_LOG_LIMIT:
+            body_text = body_text[:_UPSTREAM_BODY_LOG_LIMIT] + "...[truncated]"
+        super().__init__(f"{context} failed: status={status_code}, body={body_text}")
+
+
 def ensure_ok(response: requests.Response, context: str) -> None:
     if 200 <= response.status_code < 300:
         return
@@ -35,7 +64,13 @@ def ensure_ok(response: requests.Response, context: str) -> None:
         body = response.json()
     except Exception:
         pass
-    raise RuntimeError(f"{context} failed: status={response.status_code}, body={body}")
+    retry_after_header = response.headers.get("Retry-After") if hasattr(response, "headers") else None
+    retry_after: int | None = None
+    if retry_after_header is not None:
+        retry_after_text = str(retry_after_header).strip()
+        if retry_after_text.isdigit():
+            retry_after = int(retry_after_text)
+    raise UpstreamHTTPError(context, response.status_code, body, retry_after=retry_after)
 
 
 def sse_json_stream(items) -> Iterator[str]:

@@ -11,6 +11,8 @@ from services.protocol.conversation import (
     ConversationRequest,
     ImageOutput,
     encode_images,
+    message_text,
+    normalize_message_content,
     stream_image_outputs_with_pool,
     stream_text_deltas,
     text_backend,
@@ -21,6 +23,16 @@ from utils.helper import extract_image_from_message_content, extract_response_pr
 
 def is_text_response_request(body: dict[str, Any]) -> bool:
     return not has_response_image_generation_tool(body)
+
+
+def is_response_content_block(item: object) -> bool:
+    if not isinstance(item, dict):
+        return False
+    return str(item.get("type") or "").strip() in {"text", "input_text", "image_url", "input_image"}
+
+
+def _message_has_content(content: object) -> bool:
+    return bool(content if isinstance(content, list) else message_text(content))
 
 
 def extract_response_image(input_value: object) -> tuple[bytes, str] | None:
@@ -53,22 +65,28 @@ def messages_from_input(input_value: object, instructions: object = None) -> lis
             messages.append({"role": "user", "content": input_value.strip()})
         return messages
     if isinstance(input_value, dict):
+        content = normalize_message_content(input_value.get("content", ""))
+        if not _message_has_content(content):
+            content = extract_response_prompt([input_value]) or ""
         messages.append({
             "role": str(input_value.get("role") or "user"),
-            "content": extract_response_prompt([input_value]) or input_value.get("content") or "",
+            "content": content,
         })
         return messages
     if isinstance(input_value, list):
-        if all(isinstance(item, dict) and item.get("type") for item in input_value):
-            text = extract_response_prompt(input_value)
-            if text:
-                messages.append({"role": "user", "content": text})
+        if input_value and all(is_response_content_block(item) for item in input_value):
+            content = normalize_message_content(input_value)
+            if _message_has_content(content):
+                messages.append({"role": "user", "content": content})
             return messages
         for item in input_value:
             if isinstance(item, dict):
+                content = normalize_message_content(item.get("content", ""))
+                if not _message_has_content(content):
+                    content = extract_response_prompt([item]) or item.get("content") or ""
                 messages.append({
                     "role": str(item.get("role") or "user"),
-                    "content": extract_response_prompt([item]) or item.get("content") or "",
+                    "content": content,
                 })
     return messages
 

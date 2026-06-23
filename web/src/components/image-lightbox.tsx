@@ -2,13 +2,13 @@
 
 import { useCallback, useEffect } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { ChevronLeft, ChevronRight, Download, X } from "lucide-react";
-
-import { cn } from "@/lib/utils";
+import { ChevronLeft, ChevronRight, X } from "lucide-react";
 
 type LightboxImage = {
   id: string;
   src: string;
+  recordId?: string;
+  fileName?: string;
   sizeLabel?: string;
   dimensions?: string;
 };
@@ -57,14 +57,6 @@ export function ImageLightbox({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [open, goPrev, goNext]);
 
-  const handleDownload = useCallback(() => {
-    if (!current) return;
-    const link = document.createElement("a");
-    link.href = current.src;
-    link.download = `image-${current.id}.png`;
-    link.click();
-  }, [current]);
-
   if (!current) return null;
 
   return (
@@ -79,7 +71,6 @@ export function ImageLightbox({
             图片预览
           </DialogPrimitive.Title>
 
-          {/* toolbar */}
           <div className="absolute top-4 right-4 z-10 flex items-center gap-2">
             {current.sizeLabel || current.dimensions ? (
               <span className="rounded-full bg-black/50 px-3 py-1.5 text-xs font-medium text-white/90">
@@ -91,21 +82,12 @@ export function ImageLightbox({
                 {currentIndex + 1} / {images.length}
               </span>
             )}
-            <button
-              type="button"
-              onClick={handleDownload}
-              className="inline-flex size-9 items-center justify-center rounded-full bg-black/50 text-white/90 transition hover:bg-black/70"
-              aria-label="下载图片"
-            >
-              <Download className="size-4" />
-            </button>
             <DialogPrimitive.Close className="inline-flex size-9 items-center justify-center rounded-full bg-black/50 text-white/90 transition hover:bg-black/70">
               <X className="size-4" />
               <span className="sr-only">关闭</span>
             </DialogPrimitive.Close>
           </div>
 
-          {/* prev */}
           {hasPrev && (
             <button
               type="button"
@@ -117,7 +99,6 @@ export function ImageLightbox({
             </button>
           )}
 
-          {/* image */}
           <div
             className="flex max-h-[90vh] max-w-[90vw] items-center justify-center"
             onClick={() => onOpenChange(false)}
@@ -131,7 +112,6 @@ export function ImageLightbox({
             />
           </div>
 
-          {/* next */}
           {hasNext && (
             <button
               type="button"

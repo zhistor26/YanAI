@@ -125,9 +125,23 @@ def _normalize_user_image_channel_config(
     except (TypeError, ValueError):
         timeout = 60
 
+    channel_type = _clean_text(pick("type", "openai_image")) or "openai_image"
+    if channel_type not in {"openai_image", "async_videos"}:
+        channel_type = "openai_image"
+    if "source" in raw_config:
+        source = _clean_text(raw_config.get("source")) or "default"
+    elif _bool(pick("enabled", False), False):
+        source = "personal"
+    else:
+        source = _clean_text(current_config.get("source")) or "default"
+    if source not in {"default", "personal"}:
+        source = "default"
+    enabled = source == "personal"
     normalized = {
-        "enabled": _bool(pick("enabled", False), False),
+        "source": source,
+        "enabled": enabled,
         "name": _clean_text(pick("name", "")) or "个人生图渠道",
+        "type": channel_type,
         "base_url": _clean_text(pick("base_url", "")).rstrip("/"),
         "models": _normalize_channel_models(pick("models", DEFAULT_USER_IMAGE_CHANNEL_MODELS)),
         "timeout": timeout,
@@ -555,6 +569,38 @@ class AuthService:
             self._save_users()
             self._save_sessions()
             return self._public_user(next_user), token
+
+    def login_lazycat_user(self, *, uid: str, platform_role: str = "NORMAL") -> tuple[dict[str, object], str]:
+        clean_uid = self._clean(uid)
+        if not clean_uid:
+            raise ValueError("platform uid is required")
+        normalized_email = f"{clean_uid.lower()}@lazycat.local"
+        yanai_role: AuthRole = "admin" if str(platform_role or "").upper() == "ADMIN" else "user"
+        if not self.email_exists(normalized_email):
+            password = secrets.token_urlsafe(24)
+            return self.create_user(
+                email=normalized_email,
+                password=password,
+                name=clean_uid,
+                quota=config.new_user_initial_quota,
+                role=yanai_role,
+            )
+        with self._lock:
+            index = self._find_user_index_by_email(normalized_email)
+            if index < 0:
+                raise ValueError("user not found")
+            user = dict(self._users[index])
+            if user.get("status") != "active":
+                raise ValueError("user is disabled")
+            if yanai_role == "admin" and user.get("role") != "admin":
+                user["role"] = "admin"
+            user["last_login_at"] = _now_iso()
+            user["updated_at"] = user["last_login_at"]
+            self._users[index] = user
+            token = self._create_session_locked(str(user["id"]))
+            self._save_users()
+            self._save_sessions()
+            return self._public_user(user), token
 
     def _create_session_locked(self, user_id: str) -> str:
         token = f"yai-{secrets.token_urlsafe(32)}"

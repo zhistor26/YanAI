@@ -259,7 +259,7 @@ export type LogListResponse = {
 
 export type ImageResponse = {
   created: number;
-  data: Array<{ b64_json?: string; url?: string; revised_prompt?: string }>;
+  data: Array<{ b64_json?: string; url?: string; record_id?: string; revised_prompt?: string }>;
 };
 
 export type LoginResponse = {
@@ -290,17 +290,32 @@ export type CurrentUser = {
 };
 
 export type UserImageChannel = {
+  source?: "default" | "personal" | string;
   enabled: boolean;
   name: string;
+  type?: "openai_image" | "async_videos" | string;
   base_url: string;
   models: string[];
   timeout: number;
   has_api_key: boolean;
 };
 
+export type DefaultImageChannel = {
+  id?: string;
+  name: string;
+  type?: string;
+  base_url: string;
+  models: string[];
+  timeout?: number;
+  enabled?: boolean;
+  has_api_key?: boolean;
+};
+
 export type UserImageChannelPayload = {
+  source?: "default" | "personal" | string;
   enabled: boolean;
   name: string;
+  type?: "openai_image" | "async_videos" | string;
   base_url: string;
   api_key?: string;
   models: string[] | string;
@@ -431,7 +446,7 @@ export async function updateMyProfile(payload: { name?: string }) {
 }
 
 export async function fetchMyImageChannel() {
-  return httpRequest<{ channel: UserImageChannel }>("/api/me/image-channel");
+  return httpRequest<{ channel: UserImageChannel; default_channels: DefaultImageChannel[] }>("/api/me/image-channel");
 }
 
 export async function updateMyImageChannel(payload: UserImageChannelPayload) {
@@ -515,7 +530,7 @@ export async function generateImage(prompt: string, model?: ImageModel, size?: s
         ...(model ? { model } : {}),
         ...(size ? { size } : {}),
         n: 1,
-        response_format: "url",
+        response_format: "b64_json",
       },
     },
   );
@@ -536,7 +551,7 @@ export async function editImage(files: File | File[], prompt: string, model?: Im
     formData.append("size", size);
   }
   formData.append("n", "1");
-  formData.append("response_format", "url");
+  formData.append("response_format", "b64_json");
 
   return httpRequest<ImageResponse>(
     "/v1/images/edits",
@@ -750,14 +765,6 @@ export async function deleteMyImages(items: ManagedImageDeleteTarget[]) {
   );
 }
 
-export async function downloadMyImages(items: ManagedImageDeleteTarget[]) {
-  return httpRequest<Blob>("/api/me/images/download", {
-    method: "POST",
-    body: { items },
-    responseType: "blob",
-  });
-}
-
 export async function fetchMyImagesWebDAVConfig() {
   return httpRequest<{ webdav: ImageWebDAVConfig }>("/api/me/images/webdav");
 }
@@ -943,7 +950,7 @@ export async function deleteRedeemCodes(codeIds: string[]) {
 export type Channel = {
   id: string;
   name: string;
-  type: "internal_pool" | "openai_image";
+  type: "internal_pool" | "openai_image" | "async_videos" | string;
   base_url: string;
   models: string[];
   weight: number;
@@ -1018,6 +1025,7 @@ export async function createChannel(payload: {
   name: string;
   base_url: string;
   api_key: string;
+  type?: string;
   models: string[] | string;
   weight: number;
   priority: number;
@@ -1036,6 +1044,7 @@ export async function updateChannel(
     name: string;
     base_url: string;
     api_key: string;
+    type: string;
     models: string[] | string;
     weight: number;
     priority: number;

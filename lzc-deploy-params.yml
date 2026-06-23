@@ -1,0 +1,18 @@
+params:
+  - id: channel_url
+    type: string
+    name: 图片 API 地址
+    description: gpt-image-2 异步接口根地址，例如 https://otuapi.com（不要带 /v1）
+    default_value: https://otuapi.com
+    optional: true
+  - id: channel_api_key
+    type: secret
+    name: 图片 API Key
+    description: 对应渠道的 Bearer Token；留空则使用内置默认 Key
+    optional: true
+  - id: channel_models
+    type: string
+    name: 默认模型
+    description: 逗号分隔，例如 gpt-image-2
+    default_value: gpt-image-2
+    optional: true

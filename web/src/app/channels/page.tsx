@@ -34,6 +34,7 @@ const DEFAULT_CHANNEL_MODELS =
 
 type ChannelForm = {
   name: string;
+  api_type: "openai_image" | "async_videos";
   base_url: string;
   api_key: string;
   models: string;
@@ -43,16 +44,17 @@ type ChannelForm = {
   enabled: boolean;
 };
 
-type TextFieldKey = Exclude<keyof ChannelForm, "enabled">;
+type TextFieldKey = Exclude<keyof ChannelForm, "enabled" | "api_type">;
 
 const EMPTY_FORM: ChannelForm = {
   name: "",
+  api_type: "async_videos",
   base_url: "",
   api_key: "",
-  models: DEFAULT_CHANNEL_MODELS,
+  models: "gpt-image-2",
   weight: "1",
   priority: "0",
-  timeout: "60",
+  timeout: "180",
   enabled: true,
 };
 
@@ -119,12 +121,13 @@ const resetForm = (): ChannelForm => ({ ...EMPTY_FORM });
 
 const channelToForm = (channel: Channel): ChannelForm => ({
   name: channel.name || "",
+  api_type: channel.type === "openai_image" ? "openai_image" : "async_videos",
   base_url: channel.base_url || "",
   api_key: "",
   models: channel.models?.join(",") || "",
   weight: String(channel.weight ?? 1),
   priority: String(channel.priority ?? 0),
-  timeout: String(channel.timeout ?? 60),
+  timeout: String(channel.timeout ?? 180),
   enabled: channel.enabled,
 });
 
@@ -133,8 +136,11 @@ const toNumber = (value: string, fallback: number) => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
-const channelTypeLabel = (channel: Channel) =>
-  channel.type === "internal_pool" ? "内置账号池" : "OpenAI 图片兼容";
+const channelTypeLabel = (channel: Channel) => {
+  if (channel.type === "internal_pool") return "内置账号池";
+  if (channel.type === "async_videos") return "gpt-image-2 异步 /v1/videos";
+  return "OpenAI /v1/images";
+};
 
 const uniqueModels = (models: string[] | undefined) => {
   const seen = new Set<string>();
@@ -148,6 +154,25 @@ const uniqueModels = (models: string[] | undefined) => {
   }
   return result;
 };
+
+function ApiTypeSelect({
+  value,
+  onChange,
+}: {
+  value: ChannelForm["api_type"];
+  onChange: (value: ChannelForm["api_type"]) => void;
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(event) => onChange(event.target.value === "openai_image" ? "openai_image" : "async_videos")}
+      className="h-10 w-full rounded-xl border border-rose-100 bg-white px-3 text-sm text-stone-800"
+    >
+      <option value="async_videos">gpt-image-2 异步（POST /v1/videos，如 otuapi）</option>
+      <option value="openai_image">OpenAI 兼容（POST /v1/images/generations）</option>
+    </select>
+  );
+}
 
 function FieldCaption({ field }: { field: (typeof CHANNEL_FIELDS)[number] }) {
   return (
@@ -236,10 +261,11 @@ function ChannelsContent() {
         name: form.name.trim(),
         base_url: form.base_url.trim(),
         api_key: form.api_key.trim(),
+        type: form.api_type,
         models: form.models,
         weight: toNumber(form.weight, 1),
         priority: toNumber(form.priority, 0),
-        timeout: toNumber(form.timeout, 60),
+        timeout: toNumber(form.timeout, 180),
         enabled: form.enabled,
       });
       setItems(data.items);
@@ -332,11 +358,12 @@ function ChannelsContent() {
         : {
             name: editForm.name.trim(),
             base_url: editForm.base_url.trim(),
+            type: editForm.api_type,
             ...(editForm.api_key.trim() ? { api_key: editForm.api_key.trim() } : {}),
             models: editForm.models,
             weight: toNumber(editForm.weight, 1),
             priority: toNumber(editForm.priority, 0),
-            timeout: toNumber(editForm.timeout, 60),
+            timeout: toNumber(editForm.timeout, 180),
             enabled: editForm.enabled,
           };
       const data = await updateChannel(editingChannel.id, payload);
@@ -372,11 +399,18 @@ function ChannelsContent() {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-2 text-sm font-semibold text-stone-800">
               <Plus className="size-4 text-rose-500" />
-              新增 OpenAI 图片兼容渠道
+              新增生图渠道
             </div>
-            <div className="text-xs text-stone-400">填写 OpenAI 兼容地址后，可在列表中测试模型接口。</div>
+            <div className="text-xs text-stone-400">支持 OpenAI 兼容接口或 gpt-image-2 异步 /v1/videos 接口。</div>
           </div>
-          <div className="grid gap-3 lg:grid-cols-[1fr_1.4fr_1.15fr]">
+          <div className="grid gap-3 lg:grid-cols-[1.2fr_1fr_1fr_1fr]">
+            <div className="space-y-1.5">
+              <label className="block text-xs font-semibold text-stone-700">接口类型</label>
+              <ApiTypeSelect
+                value={form.api_type}
+                onChange={(api_type) => setForm((current) => ({ ...current, api_type }))}
+              />
+            </div>
             {PRIMARY_FIELDS.map((field) => (
               <div key={field.key} className="space-y-1.5">
                 <FieldCaption field={field} />
@@ -633,6 +667,13 @@ function ChannelsContent() {
               </div>
             ) : (
               <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-1.5 sm:col-span-2">
+                  <label className="block text-xs font-semibold text-stone-700">接口类型</label>
+                  <ApiTypeSelect
+                    value={editForm.api_type}
+                    onChange={(api_type) => setEditForm((current) => ({ ...current, api_type }))}
+                  />
+                </div>
                 {CHANNEL_FIELDS.map((field) => (
                   <div key={field.key} className={field.key === "models" ? "space-y-1.5 sm:col-span-2" : "space-y-1.5"}>
                     <FieldCaption field={field} />

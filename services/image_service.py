@@ -1,15 +1,22 @@
 from __future__ import annotations
 
-from datetime import datetime
+import base64
+from dataclasses import dataclass
+from mimetypes import guess_type
 from pathlib import Path
 import uuid
 from urllib.parse import unquote, urlparse
 
+import requests
+
 from services.config import config
 from services.observability import get_current_request_id
+from services.protocol.conversation import save_image_bytes
 from services.repositories.base import ImageRecordRepository
 from services.storage.base import StorageBackend
 from services.webdav_service import sync_created_records_to_webdav
+from utils.log import logger
+from utils.timezone import china_now_text, china_timestamp_text
 
 
 def _clean(value: object) -> str:
@@ -42,15 +49,18 @@ def _record_to_item(record: dict[str, object], base_url: str) -> dict[str, objec
     name = Path(parsed_path).name or record_id or "image.png"
     size = _int_or_zero(record.get("size"))
     image_size = _clean(record.get("image_size"))
+    file_created_at = ""
     if not image_size and record.get("size") is not None and size == 0:
         image_size = _clean(record.get("size"))
     if parsed_path.startswith("/images/"):
         local_path = config.images_dir / parsed_path.removeprefix("/images/")
         if local_path.exists() and local_path.is_file():
-            size = local_path.stat().st_size
+            stat = local_path.stat()
+            size = stat.st_size
+            file_created_at = china_timestamp_text(stat.st_mtime)
             if not url.startswith("http"):
                 url = f"{base_url.rstrip('/')}{parsed_path}"
-    created_at = _clean(record.get("created_at")) or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    created_at = _clean(record.get("created_at")) or file_created_at or china_now_text()
     day = created_at[:10]
     return {
         "id": record_id,
@@ -221,11 +231,11 @@ def _list_files(base_url: str, start_date: str = "", end_date: str = "", seen_ur
         if not path.is_file():
             continue
         rel = path.relative_to(root).as_posix()
-        parts = rel.split("/")
         stat = path.stat()
         if stat.st_size <= 0:
             continue
-        day = "-".join(parts[:3]) if len(parts) >= 4 else datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d")
+        created_at = china_timestamp_text(stat.st_mtime)
+        day = created_at[:10]
         if start_date and day < start_date:
             continue
         if end_date and day > end_date:
@@ -238,7 +248,7 @@ def _list_files(base_url: str, start_date: str = "", end_date: str = "", seen_ur
             "date": day,
             "size": stat.st_size,
             "url": url,
-            "created_at": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            "created_at": created_at,
         })
     items.sort(key=lambda item: str(item["created_at"]), reverse=True)
     return items
@@ -390,6 +400,142 @@ def _unique_name(name: str, used: set[str]) -> str:
     return candidate
 
 
+@dataclass(frozen=True)
+class ImageDownloadPayload:
+    name: str
+    media_type: str
+    path: Path | None = None
+    data: bytes | None = None
+
+
+def _find_owned_image_record(
+    *,
+    record_id: str = "",
+    url: str = "",
+    owner_user_id: str = "",
+) -> dict[str, object] | None:
+    normalized_id = _clean(record_id)
+    normalized_url = _clean(url)
+    if not normalized_id and not normalized_url:
+        return None
+
+    storage = _image_record_source()
+    try:
+        records = storage.list() if isinstance(storage, ImageRecordRepository) else storage.load_image_records()
+    except Exception:
+        records = []
+
+    for record in records:
+        if not isinstance(record, dict) or not _record_owner_matches(record, owner_user_id):
+            continue
+        current_id = _record_id(record)
+        current_url = _clean(record.get("url"))
+        if normalized_id and current_id == normalized_id:
+            return record
+        if normalized_url and current_url == normalized_url:
+            return record
+    return None
+
+
+def get_image_download_payload(
+    *,
+    record_id: str = "",
+    url: str = "",
+    owner_user_id: str = "",
+) -> ImageDownloadPayload:
+    record = _find_owned_image_record(
+        record_id=record_id,
+        url=url,
+        owner_user_id=owner_user_id,
+    )
+    if record is None:
+        raise LookupError("image not found")
+
+    record_url = _clean(record.get("url"))
+    if not record_url:
+        raise LookupError("image url is empty")
+
+    local_path = _local_image_path_from_url(record_url)
+    if local_path is not None:
+        try:
+            if local_path.is_file() and local_path.stat().st_size > 0:
+                media_type = guess_type(local_path.name)[0] or "application/octet-stream"
+                return ImageDownloadPayload(
+                    name=_safe_download_name(record, local_path),
+                    media_type=media_type,
+                    path=local_path,
+                )
+        except OSError:
+            pass
+
+    response = requests.get(record_url, timeout=60)
+    response.raise_for_status()
+    media_type = _clean(response.headers.get("Content-Type")) or guess_type(record_url)[0] or "application/octet-stream"
+    name = _safe_download_name(record, Path(unquote(urlparse(record_url).path)))
+    return ImageDownloadPayload(
+        name=name,
+        media_type=media_type,
+        data=response.content,
+    )
+
+
+def _local_image_path_from_saved_url(url: str) -> str:
+    parsed_path = unquote(urlparse(_clean(url)).path)
+    return parsed_path if parsed_path.startswith("/images/") else _clean(url)
+
+
+def _is_local_image_url(url: str) -> bool:
+    parsed_path = unquote(urlparse(_clean(url)).path)
+    return parsed_path.startswith("/images/")
+
+
+def _save_bytes_to_local_url(image_data: bytes) -> str:
+    return _local_image_path_from_saved_url(save_image_bytes(image_data))
+
+
+def _persist_image_item_url(item: dict[str, object]) -> None:
+    b64_json = _clean(item.get("b64_json"))
+    if b64_json:
+        try:
+            image_data = base64.b64decode(b64_json)
+            if image_data:
+                item["url"] = _save_bytes_to_local_url(image_data)
+                item.pop("b64_json", None)
+        except Exception as exc:
+            logger.warning("failed to persist b64_json image: %s", exc)
+        return
+
+    url = _clean(item.get("url"))
+    if not url:
+        return
+    if _is_local_image_url(url):
+        item["url"] = _local_image_path_from_saved_url(url)
+        return
+
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return
+
+    try:
+        response = requests.get(url, timeout=60)
+        response.raise_for_status()
+        image_data = response.content
+        if not image_data:
+            return
+        item["url"] = _save_bytes_to_local_url(image_data)
+    except Exception as exc:
+        logger.warning("failed to download external image %s: %s", url, exc)
+
+
+def _persist_result_images(result: dict[str, object]) -> None:
+    data = result.get("data")
+    if not isinstance(data, list):
+        return
+    for item in data:
+        if isinstance(item, dict):
+            _persist_image_item_url(item)
+
+
 def collect_downloadable_images(
     *,
     record_ids: list[str] | tuple[str, ...] | None = None,
@@ -448,6 +594,8 @@ def record_image_result(
     quota_cost: int = 0,
     request_id: str = "",
 ) -> list[dict[str, object]]:
+    if isinstance(result, dict):
+        _persist_result_images(result)
     data = result.get("data") if isinstance(result, dict) else None
     if not isinstance(data, list):
         return []
@@ -458,9 +606,9 @@ def record_image_result(
             records = storage.load_image_records()
         except Exception:
             records = []
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = china_now_text()
     owner_role = _clean(identity.get("role"))
-    owner_user_id = _clean(identity.get("id")) if owner_role == "user" else ""
+    owner_user_id = _clean(identity.get("id")) if owner_role in {"user", "admin"} else ""
     normalized_request_id = _clean(request_id) or get_current_request_id()
     created: list[dict[str, object]] = []
     for item in data:
@@ -488,6 +636,7 @@ def record_image_result(
             "quota_cost": quota_cost if owner_user_id else 0,
         }
         created.append(record)
+        item["record_id"] = record_id
     if created:
         if isinstance(storage, ImageRecordRepository):
             for record in created:

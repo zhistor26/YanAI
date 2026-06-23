@@ -1,0 +1,91 @@
+usage: >-
+  颜AI 懒猫微服图片创作应用。平台免密登录，参考图/生成图可通过懒猫网盘打开与保存。
+  数据持久化于 /lzcapp/var/data。安装时配置 OpenAI 兼容图片 API。
+
+application:
+  subdomain: yanai
+  routes:
+    - /=http://yanai:80
+  injects:
+    - id: yanai-lazycat-autologin
+      on: browser
+      when:
+        - /*
+      do:
+        - src: file:///lzcapp/pkg/content/injects/lazycat-autologin.js
+    - id: yanai-netdisk-open
+      on: browser
+      when:
+        - /*
+      do:
+        - src: file:///lzcapp/pkg/content/injects/yanai-netdisk-open.js
+    - id: yanai-netdisk-chooser
+      on: browser
+      when:
+        - /*
+      do:
+        - src: file:///lzcapp/pkg/content/lazycat-injects/lzc-file-chooser-inject.js
+          params:
+            diskRoot: /_lzc/files/home
+            fallbackMime: application/octet-stream
+            locale: auto
+            hooks:
+              fileInput: true
+              fileSystemAccess: true
+            text:
+              zh-CN:
+                openTitle: 打开
+                saveTitle: 保存
+                openLocal: 本机
+                openLazyCat: 懒猫网盘
+                saveLocal: 本机
+                saveLazyCat: 懒猫网盘
+                cancel: 取消
+              en-US:
+                openTitle: Open
+                saveTitle: Save
+                openLocal: Local
+                openLazyCat: LazyCat Drive
+                saveLocal: Local
+                saveLazyCat: LazyCat Drive
+                cancel: Cancel
+  file_handler:
+    mime:
+      - image/png
+      - image/jpeg
+      - image/webp
+      - image/gif
+      - x-lzc-extension/png
+      - x-lzc-extension/jpg
+      - x-lzc-extension/jpeg
+      - x-lzc-extension/webp
+      - x-lzc-extension/gif
+    actions:
+      open: /image/?file=%u
+
+services:
+  yanai:
+    image: registry.lazycat.cloud/u64111927/meiyounonono/yanai:283d4f1469488603
+    binds:
+      - /lzcapp/var/data:/app/data
+      - /lzcapp/var/config:/app/config
+    environment:
+      - STORAGE_BACKEND=json
+      - YANAI_CONFIG_FILE=/app/config/config.json
+      - YANAI_DEFAULT_CHANNEL_URL=https://otuapi.com
+      - YANAI_DEFAULT_CHANNEL_NAME=otuapi
+      - YANAI_DEFAULT_CHANNEL_TYPE=async_videos
+      - YANAI_DEFAULT_CHANNEL_MODELS=gpt-image-2
+      - YANAI_DEFAULT_USER_QUOTA=100
+      - CHATGPT2API_AUTH_KEY={{ stable_secret "yanai_auth_key" }}
+      - CHATGPT2API_BASE_URL=https://{{ .S.AppDomain }}
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:80/health')"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s

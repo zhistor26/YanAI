@@ -46,6 +46,28 @@ def require_admin(authorization: str | None) -> dict[str, object]:
     return identity
 
 
+def resolve_account_user_id(identity: dict[str, object]) -> str:
+    role = str(identity.get("role") or "").strip().lower()
+    if role not in {"user", "admin"}:
+        return ""
+    user_id = str(identity.get("id") or "").strip()
+    if user_id and user_id != "admin":
+        return user_id
+    if role == "admin":
+        admin_users = auth_service.list_users(role="admin")
+        if admin_users:
+            return str(admin_users[0].get("id") or "").strip()
+    return ""
+
+
+def require_account_user(authorization: str | None) -> tuple[dict[str, object], str]:
+    identity = require_identity(authorization)
+    user_id = resolve_account_user_id(identity)
+    if not user_id:
+        raise HTTPException(status_code=403, detail={"error": "user permission required"})
+    return identity, user_id
+
+
 def resolve_image_base_url(request: Request) -> str:
     return config.base_url or f"{request.url.scheme}://{request.headers.get('host', request.url.netloc)}"
 

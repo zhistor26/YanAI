@@ -4,7 +4,7 @@ from fastapi import APIRouter, File, Form, Header, HTTPException, Request, Uploa
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field
 
-from api.support import require_identity, resolve_image_base_url
+from api.support import require_identity, resolve_account_user_id, resolve_image_base_url
 from services.auth_service import auth_service
 from services.channel_service import channel_service
 from services.image_service import record_image_result
@@ -79,9 +79,9 @@ def create_router() -> APIRouter:
         return request_id
 
     def attach_personal_image_channel(identity: dict[str, object], payload: dict[str, object], model: str | None) -> bool:
-        if identity.get("role") != "user":
+        user_id = resolve_account_user_id(identity)
+        if not user_id:
             return False
-        user_id = str(identity.get("id") or "")
         personal_channel = auth_service.get_user_image_channel_config(
             user_id,
             include_api_key=True,

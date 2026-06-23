@@ -33,6 +33,11 @@ import {
 import { Button } from "@/components/ui/button";
 import { editImage, fetchAccounts, fetchMe, generateImage, type Account } from "@/lib/api";
 import { resolveApiAssetUrl } from "@/lib/assets";
+import {
+  autoSaveGeneratedImage,
+  consumePendingLazyCatReferenceFile,
+  prefetchImageBlob,
+} from "@/lib/lazycat-drive";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import {
   clearImageConversations,
@@ -785,6 +790,34 @@ function ImagePageContent({ session }: { session: StoredAuthSession }) {
     }
   }, []);
 
+  useEffect(() => {
+    const handleLazyCatFile = (event: Event) => {
+      const detail = (event as CustomEvent<{ file?: File }>).detail;
+      if (detail?.file instanceof File) {
+        void appendReferenceImages([detail.file]);
+      }
+    };
+
+    const handleLazyCatFileError = (event: Event) => {
+      const detail = (event as CustomEvent<{ message?: string }>).detail;
+      const message = detail?.message?.trim() || "读取网盘图片失败，请检查文件是否存在或是否有权限";
+      toast.error(message);
+    };
+
+    window.addEventListener("yanai:lazycat-file", handleLazyCatFile);
+    window.addEventListener("yanai:lazycat-file-error", handleLazyCatFileError);
+
+    const pending = consumePendingLazyCatReferenceFile();
+    if (pending) {
+      void appendReferenceImages([pending]);
+    }
+
+    return () => {
+      window.removeEventListener("yanai:lazycat-file", handleLazyCatFile);
+      window.removeEventListener("yanai:lazycat-file-error", handleLazyCatFileError);
+    };
+  }, [appendReferenceImages]);
+
   const handleReferenceImageChange = useCallback(
     async (files: File[]) => {
       if (files.length === 0) {
@@ -922,17 +955,15 @@ function ImagePageContent({ session }: { session: StoredAuthSession }) {
               throw new Error("未返回图片数据");
             }
 
-            const nextImage: StoredImage = first.url
-              ? {
-                  id: pendingImage.id,
-                  status: "success",
-                  url: first.url,
-                }
-              : {
-                  id: pendingImage.id,
-                  status: "success",
-                  b64_json: first.b64_json,
-                };
+            const nextImage: StoredImage = {
+              id: pendingImage.id,
+              status: "success",
+              ...(first.url ? { url: first.url } : { b64_json: first.b64_json }),
+              ...(first.record_id ? { record_id: String(first.record_id) } : {}),
+            };
+            if (first.url) {
+              prefetchImageBlob(first.url, nextImage.record_id || "");
+            }
 
             await updateConversation(
               conversationId,
@@ -953,6 +984,36 @@ function ImagePageContent({ session }: { session: StoredAuthSession }) {
               },
               { persist: false },
             );
+
+            void autoSaveGeneratedImage(nextImage, `${queuedTurn.id}-${pendingImage.id}.png`)
+              .then((savedPath) => {
+                if (!savedPath) {
+                  return;
+                }
+                return updateConversation(
+                  conversationId,
+                  (current) => {
+                    const conversation = current ?? snapshot;
+                    return {
+                      ...conversation,
+                      turns: conversation.turns.map((turn) =>
+                        turn.id === queuedTurn.id
+                          ? {
+                              ...turn,
+                              images: turn.images.map((image) =>
+                                image.id === nextImage.id ? { ...image, lazycat_path: savedPath } : image,
+                              ),
+                            }
+                          : turn,
+                      ),
+                    };
+                  },
+                  { persist: false },
+                );
+              })
+              .catch((error) => {
+                console.warn("[lazycat-drive] auto-save failed", error);
+              });
 
             return nextImage;
           } catch (error) {

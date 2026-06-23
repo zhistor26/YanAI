@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from urllib.parse import urlparse
 
@@ -12,7 +13,7 @@ from services.config import config
 
 class ProxySettingsStore:
     def build_session_kwargs(self, **session_kwargs) -> dict[str, object]:
-        proxy = config.get_proxy_settings()
+        proxy = _clean(os.getenv("YANAI_PROXY") or os.getenv("CHATGPT2API_PROXY")) or config.get_proxy_settings()
         if proxy:
             session_kwargs["proxy"] = proxy
         return session_kwargs

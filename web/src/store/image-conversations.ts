@@ -17,6 +17,8 @@ export type StoredImage = {
   status?: "loading" | "success" | "error";
   b64_json?: string;
   url?: string;
+  record_id?: string;
+  lazycat_path?: string;
   error?: string;
 };
 

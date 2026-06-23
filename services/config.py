@@ -14,7 +14,7 @@ from services.repositories.base import RepositoryProvider
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data"
-CONFIG_FILE = BASE_DIR / "config.json"
+CONFIG_FILE = Path(os.getenv("YANAI_CONFIG_FILE", str(BASE_DIR / "config.json")))
 VERSION_FILE = BASE_DIR / "VERSION"
 SYSTEM_SETTING_SECRET_KEYS = {"auth-key", "smtp_password", "linuxdo_client_secret", "image_webdav_config"}
 SYSTEM_SETTING_TRANSIENT_KEYS = {"smtp_password_set", "linuxdo_client_secret_set", "image_webdav_password_set"}
@@ -138,6 +138,12 @@ class ConfigStore:
         return _read_json_object(self.path, name="config.json")
 
     def _save(self) -> None:
+        if self.path.is_dir():
+            raise IsADirectoryError(
+                f"config path '{self.path}' is a directory; set YANAI_CONFIG_FILE to a file path "
+                "(LazyCat: mount /lzcapp/var/config:/app/config and use /app/config/config.json)."
+            )
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     def _provider_if_initialized(self) -> RepositoryProvider | None:
@@ -205,6 +211,42 @@ class ConfigStore:
             return max(1, int(self._get_config_value("image_retention_days", 30)))
         except (TypeError, ValueError):
             return 30
+
+    @property
+    def image_poll_timeout_secs(self) -> float:
+        try:
+            return max(30.0, float(self._get_config_value("image_poll_timeout_secs", 120)))
+        except (TypeError, ValueError):
+            return 120.0
+
+    @property
+    def image_poll_initial_wait_secs(self) -> float:
+        try:
+            return max(0.0, float(self._get_config_value("image_poll_initial_wait_secs", 10)))
+        except (TypeError, ValueError):
+            return 10.0
+
+    @property
+    def image_poll_interval_secs(self) -> float:
+        try:
+            return max(1.0, float(self._get_config_value("image_poll_interval_secs", 10)))
+        except (TypeError, ValueError):
+            return 10.0
+
+    @property
+    def image_check_before_hit_enabled(self) -> bool:
+        return _bool(self._get_config_value("image_check_before_hit_enabled"), True)
+
+    @property
+    def image_settle_enabled(self) -> bool:
+        return _bool(self._get_config_value("image_settle_enabled"), True)
+
+    @property
+    def image_settle_secs(self) -> float:
+        try:
+            return max(0.0, float(self._get_config_value("image_settle_secs", 2)))
+        except (TypeError, ValueError):
+            return 2.0
 
     @property
     def internal_pool_enabled(self) -> bool:
@@ -403,6 +445,12 @@ class ConfigStore:
         data["refresh_account_interval_minute"] = self.refresh_account_interval_minute
         data["account_lease_ttl_seconds"] = self.account_lease_ttl_seconds
         data["image_retention_days"] = self.image_retention_days
+        data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
+        data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
+        data["image_poll_interval_secs"] = self.image_poll_interval_secs
+        data["image_check_before_hit_enabled"] = self.image_check_before_hit_enabled
+        data["image_settle_enabled"] = self.image_settle_enabled
+        data["image_settle_secs"] = self.image_settle_secs
         data["internal_pool_enabled"] = self.internal_pool_enabled
         data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts
         data["auto_remove_rate_limited_accounts"] = self.auto_remove_rate_limited_accounts

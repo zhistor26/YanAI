@@ -16,9 +16,10 @@ from services.account_service import account_service
 from services.config import config
 from services.log_service import LOG_TYPE_ACCOUNT, log_service
 from services.observability import get_current_request_id
-from services.openai_backend_api import OpenAIBackendAPI
+from services.openai_backend_api import ImageContentPolicyError, ImagePollTimeoutError, OpenAIBackendAPI
 from utils.helper import IMAGE_MODELS, anonymize_token
 from utils.log import logger
+from utils.timezone import china_now_text
 
 
 class ImageGenerationError(Exception):
@@ -57,6 +58,17 @@ def is_token_invalid_error(message: str) -> bool:
     )
 
 
+REFERENCED_IMAGE_IDS_RE = re.compile(r'"referenced_image_ids"\s*:\s*\[([^\]]+)\]')
+TOOL_PARAMS_JSON_RE = re.compile(r'\{\s*"size"\s*:\s*"\d+x\d+"\s*,\s*"n"\s*:\s*\d+\s*\}')
+
+
+def is_model_text_reply_instead_of_image(message: str) -> bool:
+    """识别 ChatGPT 先返回工具参数文本、图片稍后异步落库的场景。"""
+    if not message:
+        return False
+    return bool(REFERENCED_IMAGE_IDS_RE.search(message) or TOOL_PARAMS_JSON_RE.search(message))
+
+
 def encode_images(images: Iterable[tuple[bytes, str, str]]) -> list[str]:
     return [base64.b64encode(data).decode("ascii") for data, _, _ in images if data]
 
@@ -65,11 +77,15 @@ def save_image_bytes(image_data: bytes, base_url: str | None = None) -> str:
     config.cleanup_old_images()
     file_hash = hashlib.md5(image_data).hexdigest()
     filename = f"{file_hash}_{uuid.uuid4().hex}.png"
-    relative_dir = Path(time.strftime("%Y"), time.strftime("%m"), time.strftime("%d"))
+    relative_dir = Path(*china_now_text()[:10].split("-"))
     file_path = config.images_dir / relative_dir / filename
     file_path.parent.mkdir(parents=True, exist_ok=True)
     file_path.write_bytes(image_data)
     return f"{(base_url or config.base_url)}/images/{relative_dir.as_posix()}/{filename}"
+
+
+TEXT_CONTENT_TYPES = {"text", "input_text", "output_text"}
+IMAGE_CONTENT_TYPES = {"image_url", "input_image"}
 
 
 def message_text(content: Any) -> str:
@@ -80,10 +96,68 @@ def message_text(content: Any) -> str:
         for item in content:
             if isinstance(item, str):
                 parts.append(item)
-            elif isinstance(item, dict) and str(item.get("type") or "") in {"text", "input_text", "output_text"}:
+            elif isinstance(item, dict) and str(item.get("type") or "") in TEXT_CONTENT_TYPES:
                 parts.append(str(item.get("text") or ""))
         return "".join(parts)
     return ""
+
+
+def _image_url_from_content_block(item: dict[str, Any]) -> tuple[str, str | None]:
+    image_url = item.get("image_url") or item.get("url")
+    detail = item.get("detail")
+    if isinstance(image_url, dict):
+        detail = image_url.get("detail") or detail
+        image_url = image_url.get("url") or image_url.get("image_url")
+    return str(image_url or "").strip(), str(detail).strip() if detail else None
+
+
+def normalize_content_block(item: Any) -> dict[str, Any] | None:
+    if isinstance(item, str):
+        return {"type": "text", "text": item}
+    if not isinstance(item, dict):
+        return None
+    item_type = str(item.get("type") or "").strip()
+    if item_type in TEXT_CONTENT_TYPES:
+        text = str(item.get("text") or item.get("input_text") or "").strip()
+        return {"type": "text", "text": text} if text else None
+    if item_type in IMAGE_CONTENT_TYPES:
+        image_url, detail = _image_url_from_content_block(item)
+        file_id = str(item.get("file_id") or "").strip()
+        block: dict[str, Any] = {"type": "input_image"}
+        if image_url:
+            block["image_url"] = image_url
+        if file_id:
+            block["file_id"] = file_id
+        if detail:
+            block["detail"] = detail
+        for key in (
+            "file_name",
+            "filename",
+            "name",
+            "mime_type",
+            "mimeType",
+            "file_size",
+            "size",
+            "size_bytes",
+            "width",
+            "height",
+        ):
+            if key in item:
+                block[key] = item[key]
+        return block if image_url or file_id else None
+    text = content_value_text(item)
+    return {"type": "text", "text": text} if text else None
+
+
+def normalize_message_content(content: Any) -> str | list[dict[str, Any]]:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return message_text(content)
+    blocks = [block for item in content if (block := normalize_content_block(item)) is not None]
+    if any(str(block.get("type") or "") in IMAGE_CONTENT_TYPES for block in blocks):
+        return blocks
+    return message_text(blocks)
 
 
 def normalize_messages(messages: object, system: Any = None) -> list[dict[str, Any]]:
@@ -94,16 +168,23 @@ def normalize_messages(messages: object, system: Any = None) -> list[dict[str, A
     if isinstance(messages, list):
         for message in messages:
             if isinstance(message, dict):
-                normalized.append({"role": message.get("role", "user"), "content": message_text(message.get("content", ""))})
+                normalized.append({
+                    "role": message.get("role", "user"),
+                    "content": normalize_message_content(message.get("content", "")),
+                })
     return normalized
 
 
 def assistant_history_text(messages: list[dict[str, Any]]) -> str:
-    return "".join(str(item.get("content") or "") for item in messages if item.get("role") == "assistant")
+    return "".join(message_text(item.get("content", "")) for item in messages if item.get("role") == "assistant")
 
 
 def assistant_history_messages(messages: list[dict[str, Any]]) -> list[str]:
-    return [str(item.get("content") or "") for item in messages if item.get("role") == "assistant" and item.get("content")]
+    return [
+        text
+        for item in messages
+        if item.get("role") == "assistant" and (text := message_text(item.get("content", "")))
+    ]
 
 
 def build_image_prompt(prompt: str, size: str | None) -> str:
@@ -137,6 +218,8 @@ def count_message_tokens(messages: list[dict[str, Any]], model: str) -> int:
     for message in messages:
         total += 3
         for key, value in message.items():
+            if key == "content" and not isinstance(value, str):
+                value = message_text(value)
             if not isinstance(value, str):
                 continue
             total += len(encoding.encode(value))
@@ -244,12 +327,38 @@ class ImageOutput:
         return chunk
 
 
-def assistant_message_text(message: dict[str, Any]) -> str:
-    content = message.get("content") or {}
-    parts = content.get("parts") or []
-    if not isinstance(parts, list):
+def content_value_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "".join(content_value_text(item) for item in value)
+    if not isinstance(value, dict):
         return ""
-    return "".join(part for part in parts if isinstance(part, str))
+    for key in ("text", "value", "plain_text"):
+        text = value.get(key)
+        if isinstance(text, str):
+            return text
+    nested_content = value.get("content")
+    nested_text = content_value_text(nested_content)
+    if nested_text:
+        return nested_text
+    parts = value.get("parts")
+    if isinstance(parts, list):
+        return "".join(content_value_text(part) for part in parts)
+    return ""
+
+
+def assistant_message_from_candidate(candidate: dict[str, Any]) -> dict[str, Any] | None:
+    message = candidate.get("message")
+    if isinstance(message, dict):
+        return message
+    if isinstance(candidate.get("author"), dict) and "content" in candidate:
+        return candidate
+    return None
+
+
+def assistant_message_text(message: dict[str, Any]) -> str:
+    return content_value_text(message.get("content"))
 
 
 def strip_history(text: str, history_text: str = "") -> str:
@@ -264,8 +373,8 @@ def assistant_text(event: dict[str, Any], current_text: str = "", history_text: 
     for candidate in (event, event.get("v")):
         if not isinstance(candidate, dict):
             continue
-        message = candidate.get("message")
-        if not isinstance(message, dict):
+        message = assistant_message_from_candidate(candidate)
+        if message is None:
             continue
         role = str((message.get("author") or {}).get("role") or "").strip().lower()
         if role != "assistant":
@@ -280,18 +389,26 @@ def event_assistant_text(event: dict[str, Any], history_text: str = "") -> str:
     for candidate in (event, event.get("v")):
         if not isinstance(candidate, dict):
             continue
-        message = candidate.get("message")
+        message = assistant_message_from_candidate(candidate)
         if isinstance(message, dict) and (message.get("author") or {}).get("role") == "assistant":
             return strip_history(assistant_message_text(message), history_text)
     return ""
 
 
+def is_text_patch_path(path: object) -> bool:
+    text = str(path or "")
+    return bool(re.match(r"^/message/content(?:/.*)?$", text))
+
+
 def apply_text_patch(event: dict[str, Any], current_text: str = "", history_text: str = "") -> str:
-    if event.get("p") == "/message/content/parts/0":
+    if is_text_patch_path(event.get("p")):
+        return apply_patch_op(event, current_text, history_text)
+
+    if not event.get("p") and event.get("o") in {"add", "append", "replace"}:
         return apply_patch_op(event, current_text, history_text)
 
     operations = event.get("v")
-    if isinstance(operations, str) and current_text and not event.get("p") and not event.get("o"):
+    if isinstance(operations, str) and not event.get("p") and not event.get("o"):
         return current_text + operations
 
     if event.get("o") == "patch" and isinstance(operations, list):
@@ -313,8 +430,8 @@ def apply_text_patch(event: dict[str, Any], current_text: str = "", history_text
 
 def apply_patch_op(operation: dict[str, Any], current_text: str, history_text: str = "") -> str:
     op = operation.get("o")
-    value = str(operation.get("v") or "")
-    if op == "append":
+    value = content_value_text(operation.get("v"))
+    if op in {"add", "append"}:
         return current_text + value
     if op == "replace":
         return strip_history(value, history_text)
@@ -459,6 +576,24 @@ def collect_text(backend: OpenAIBackendAPI, request: ConversationRequest) -> str
     return "".join(stream_text_deltas(backend, request))
 
 
+def image_result_from_urls(
+        backend: OpenAIBackendAPI,
+        request: ConversationRequest,
+        image_urls: list[str],
+) -> list[dict[str, Any]]:
+    image_items = [
+        {"b64_json": base64.b64encode(image_data).decode("ascii")}
+        for image_data in backend.download_image_bytes(image_urls)
+    ]
+    return format_image_result(
+        image_items,
+        request.prompt,
+        request.response_format,
+        request.base_url,
+        int(time.time()),
+    )["data"]
+
+
 def stream_image_outputs(
         backend: OpenAIBackendAPI,
         request: ConversationRequest,
@@ -466,6 +601,7 @@ def stream_image_outputs(
         total: int = 1,
 ) -> Iterator[ImageOutput]:
     last: dict[str, Any] = {}
+    started_at = time.time()
     for event in conversation_events(
             backend,
             prompt=request.prompt,
@@ -499,7 +635,8 @@ def stream_image_outputs(
     file_ids = [str(item) for item in last.get("file_ids") or []]
     sediment_ids = [str(item) for item in last.get("sediment_ids") or []]
     message = str(last.get("text") or "").strip()
-    is_text_response = last.get("tool_invoked") is False or last.get("turn_use_case") == "text"
+    should_poll_for_image = bool(request.images) or str(request.model or "").strip() in IMAGE_MODELS or last.get("turn_use_case") == "image gen"
+    is_text_reply = bool(message and is_model_text_reply_instead_of_image(message))
     logger.info({
         "event": "image_stream_resolve_start",
         "conversation_id": conversation_id,
@@ -507,30 +644,128 @@ def stream_image_outputs(
         "sediment_ids": sediment_ids,
         "tool_invoked": last.get("tool_invoked"),
         "turn_use_case": last.get("turn_use_case"),
+        "is_text_reply": is_text_reply,
     })
-    if message and not file_ids and not sediment_ids and (last.get("blocked") or is_text_response):
+    if message and not file_ids and not sediment_ids and last.get("blocked"):
+        yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message)
+        return
+    if message and not file_ids and not sediment_ids and not should_poll_for_image and not is_text_reply:
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message)
         return
 
-    image_urls = backend.resolve_conversation_image_urls(conversation_id, file_ids, sediment_ids)
+    if is_text_reply and not conversation_id:
+        try:
+            recovered_id = backend.find_conversation_by_prompt(request.prompt, started_at, timeout_secs=5.0)
+            if recovered_id:
+                conversation_id = recovered_id
+                logger.info({
+                    "event": "image_conversation_id_recovered",
+                    "conversation_id": conversation_id,
+                    "message_preview": message[:200],
+                })
+        except Exception as exc:
+            logger.warning({"event": "image_conversation_id_recovery_failed", "error": repr(exc)[:300]})
+
+    poll_timeout = config.image_poll_timeout_secs
+    if is_text_reply and conversation_id:
+        poll_timeout = max(poll_timeout, 300)
+        logger.info({
+            "event": "image_text_reply_extended_poll",
+            "conversation_id": conversation_id,
+            "poll_timeout_secs": poll_timeout,
+        })
+
+    image_urls: list[str] = []
+    if conversation_id:
+        try:
+            image_urls = backend.resolve_conversation_image_urls(
+                conversation_id,
+                file_ids,
+                sediment_ids,
+                poll_timeout_secs=poll_timeout,
+            )
+        except ImageContentPolicyError as exc:
+            if is_text_reply:
+                logger.warning({
+                    "event": "image_text_reply_policy_error_deferred",
+                    "conversation_id": conversation_id,
+                    "error": str(exc),
+                })
+            else:
+                raise ImageGenerationError(
+                    str(exc) or "Image generation was rejected by upstream policy.",
+                    status_code=400,
+                    error_type="invalid_request_error",
+                    code="content_policy_violation",
+                ) from exc
+        except ImagePollTimeoutError:
+            raise
+    elif file_ids or sediment_ids:
+        image_urls = backend.resolve_conversation_image_urls(conversation_id, file_ids, sediment_ids, poll=False)
+
     if image_urls:
-        image_items = [
-            {"b64_json": base64.b64encode(image_data).decode("ascii")}
-            for image_data in backend.download_image_bytes(image_urls)
-        ]
-        data = format_image_result(
-            image_items,
-            request.prompt,
-            request.response_format,
-            request.base_url,
-            int(time.time()),
-        )["data"]
+        data = image_result_from_urls(backend, request, image_urls)
         if data:
             yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data)
         return
 
+    if is_text_reply and conversation_id:
+        logger.info({
+            "event": "image_model_text_reply_retry_poll",
+            "conversation_id": conversation_id,
+            "message_preview": message[:200],
+        })
+        try:
+            polled_file_ids, polled_sediment_ids = backend._poll_image_results(
+                conversation_id,
+                max(config.image_poll_timeout_secs, 300),
+                file_ids,
+                sediment_ids,
+            )
+            file_ids.extend(item for item in polled_file_ids if item and item not in file_ids)
+            sediment_ids.extend(item for item in polled_sediment_ids if item and item not in sediment_ids)
+        except ImageContentPolicyError as exc:
+            raise ImageGenerationError(
+                str(exc) or "Image generation was rejected by upstream policy.",
+                status_code=400,
+                error_type="invalid_request_error",
+                code="content_policy_violation",
+            ) from exc
+        except ImagePollTimeoutError as exc:
+            logger.warning({
+                "event": "image_model_text_reply_poll_timeout",
+                "conversation_id": conversation_id,
+                "error": str(exc),
+            })
+        if file_ids or sediment_ids:
+            image_urls = backend.resolve_conversation_image_urls(conversation_id, file_ids, sediment_ids, poll=False)
+            if image_urls:
+                data = image_result_from_urls(backend, request, image_urls)
+                if data:
+                    yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data)
+                    return
+
     if message:
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message)
+        return
+
+    if should_poll_for_image and conversation_id:
+        yield ImageOutput(
+            kind="message",
+            model=request.model,
+            index=index,
+            total=total,
+            text="Image generation completed upstream but the result could not be retrieved. The image may still be processing. Please try again in a moment.",
+        )
+        return
+
+    yield ImageOutput(
+        kind="message",
+        model=request.model,
+        index=index,
+        total=total,
+        text="Image generation started upstream but the response was incomplete. Please try again.",
+    )
 
 
 def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[ImageOutput]:

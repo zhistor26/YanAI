@@ -1,6 +1,8 @@
 import type { StoredImage } from "@/store/image-conversations";
-import { resolveApiAssetUrl } from "@/lib/assets";
+import { isLocalImagePath, resolveApiAssetUrl } from "@/lib/assets";
 import { getStoredAuthKey } from "@/store/auth";
+
+const imageBlobCache = new Map<string, Promise<Blob>>();
 
 const LAZY_CAT_DISK_PREFIX = "/_lzc/files/home";
 export const LAZY_CAT_GENERATED_DIR = "/YanAI/generated";
@@ -81,6 +83,39 @@ async function buildAuthHeaders() {
   return headers;
 }
 
+function blobCacheKey(source: string, recordId = "") {
+  return `${recordId}::${source.trim()}`;
+}
+
+function dataUrlToBlob(dataUrl: string) {
+  const [header, base64] = dataUrl.split(",");
+  const mime = header.match(/^data:(.*?);base64$/)?.[1] || "image/png";
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return new Blob([bytes], { type: mime });
+}
+
+export function prefetchImageBlob(source: string, recordId = "") {
+  const normalized = source.trim();
+  if (!normalized || normalized.startsWith("data:")) {
+    return;
+  }
+  const key = blobCacheKey(normalized, recordId);
+  if (imageBlobCache.has(key)) {
+    return;
+  }
+  imageBlobCache.set(
+    key,
+    imageSourceToBlob(normalized, recordId).catch((error) => {
+      imageBlobCache.delete(key);
+      throw error;
+    }),
+  );
+}
+
 export async function fetchMyImageBlob(recordId: string, url: string) {
   const params = new URLSearchParams();
   if (recordId.trim()) {
@@ -100,33 +135,66 @@ export async function fetchMyImageBlob(recordId: string, url: string) {
 }
 
 export async function imageSourceToBlob(source: string, recordId = "") {
-  const resolved = source.startsWith("data:") ? source : resolveApiAssetUrl(source);
-  if (isSameOriginUrl(resolved)) {
-    try {
-      const response = await fetch(resolved, { credentials: "include" });
+  const normalized = source.trim();
+  if (!normalized) {
+    throw new Error("图片缺少可保存的数据");
+  }
+
+  if (normalized.startsWith("data:")) {
+    return dataUrlToBlob(normalized);
+  }
+
+  const cacheKey = blobCacheKey(normalized, recordId);
+  const cached = imageBlobCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const load = (async () => {
+    const resolved = resolveApiAssetUrl(normalized);
+
+    if (isLocalImagePath(normalized)) {
+      const headers = await buildAuthHeaders();
+      const response = await fetch(resolved, {
+        credentials: "include",
+        headers,
+        cache: "force-cache",
+      });
       if (response.ok) {
         return response.blob();
       }
-    } catch {
-      // Fall back to authenticated API proxy for cross-origin or blocked fetches.
+      if (recordId) {
+        return fetchMyImageBlob(recordId, normalized);
+      }
+      throw new Error(`读取图片失败 (${response.status})`);
     }
+
+    if (isSameOriginUrl(resolved)) {
+      const response = await fetch(resolved, { credentials: "include", cache: "force-cache" });
+      if (response.ok) {
+        return response.blob();
+      }
+    }
+
+    return fetchMyImageBlob(recordId, normalized);
+  })();
+
+  imageBlobCache.set(cacheKey, load);
+  try {
+    return await load;
+  } catch (error) {
+    imageBlobCache.delete(cacheKey);
+    throw error;
   }
-  if (recordId || source) {
-    return fetchMyImageBlob(recordId, source);
-  }
-  const response = await fetch(resolved, { credentials: "include" });
-  if (!response.ok) {
-    throw new Error(`读取图片失败 (${response.status})`);
-  }
-  return response.blob();
 }
 
 export async function storedImageToBlob(image: StoredImage) {
-  if (image.url) {
-    return imageSourceToBlob(image.url);
-  }
+  const recordId = image.record_id || "";
   if (image.b64_json) {
-    return imageSourceToBlob(`data:image/png;base64,${image.b64_json}`);
+    return imageSourceToBlob(`data:image/png;base64,${image.b64_json}`, recordId);
+  }
+  if (image.url) {
+    return imageSourceToBlob(image.url, recordId);
   }
   throw new Error("图片缺少可保存的数据");
 }
@@ -212,36 +280,123 @@ export function triggerLazyCatDownload(blob: Blob, fileName: string) {
   }, 2000);
 }
 
-export async function saveBlobWithPicker(blob: Blob, fileName: string) {
+export type SaveImageOutcome = "saved" | "cancelled";
+
+export function isUserCancelledSave(error: unknown) {
+  if (!error) {
+    return false;
+  }
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return true;
+  }
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  return (
+    message.includes("abort") ||
+    message.includes("cancel") ||
+    message.includes("dismiss") ||
+    message.includes("用户取消")
+  );
+}
+
+async function writeBlobToPicker(blob: Blob, fileName: string) {
   const picker = window.showSaveFilePicker?.bind(window);
-  if (picker) {
-    const handle = await picker({
-      suggestedName: sanitizeFileName(fileName),
-      types: [
-        {
-          description: "Image",
-          accept: {
-            "image/*": [".png", ".jpg", ".jpeg", ".webp", ".gif"],
-          },
-        },
-      ],
-    });
-    const writable = await handle.createWritable();
-    await writable.write(blob);
-    await writable.close();
+  if (!picker) {
+    triggerLazyCatDownload(blob, fileName);
     return;
   }
-  triggerLazyCatDownload(blob, fileName);
+  const handle = await picker({
+    suggestedName: sanitizeFileName(fileName),
+    types: [
+      {
+        description: "Image",
+        accept: {
+          "image/*": [".png", ".jpg", ".jpeg", ".webp", ".gif"],
+        },
+      },
+    ],
+  });
+  const writable = await handle.createWritable();
+  await writable.write(blob);
+  await writable.close();
 }
 
-export async function downloadStoredImageViaLazyCat(image: StoredImage, fileName: string) {
-  const blob = await storedImageToBlob(image);
-  await saveBlobWithPicker(blob, fileName);
+function canOpenSavePickerFirst(source: string) {
+  const normalized = source.trim();
+  return Boolean(
+    normalized &&
+      (normalized.startsWith("data:") ||
+        isLocalImagePath(normalized) ||
+        (normalized.startsWith("http") && isSameOriginUrl(normalized))),
+  );
 }
 
-export async function downloadSourceViaLazyCat(source: string, fileName: string, recordId = "") {
-  const blob = await imageSourceToBlob(source, recordId);
-  await saveBlobWithPicker(blob, fileName);
+export async function saveStoredImageToDisk(image: StoredImage, fileName: string): Promise<SaveImageOutcome> {
+  try {
+    const source = image.b64_json ? `data:image/png;base64,${image.b64_json}` : image.url || "";
+    if (canOpenSavePickerFirst(source) && window.showSaveFilePicker) {
+      const handlePromise = window.showSaveFilePicker({
+        suggestedName: sanitizeFileName(fileName),
+        types: [
+          {
+            description: "Image",
+            accept: {
+              "image/*": [".png", ".jpg", ".jpeg", ".webp", ".gif"],
+            },
+          },
+        ],
+      });
+      const blob = await storedImageToBlob(image);
+      const handle = await handlePromise;
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      return "saved";
+    }
+    const blob = await storedImageToBlob(image);
+    await writeBlobToPicker(blob, fileName);
+    return "saved";
+  } catch (error) {
+    if (isUserCancelledSave(error)) {
+      return "cancelled";
+    }
+    throw error;
+  }
+}
+
+export async function saveImageSourceToDisk(
+  source: string,
+  fileName: string,
+  recordId = "",
+): Promise<SaveImageOutcome> {
+  try {
+    if (canOpenSavePickerFirst(source) && window.showSaveFilePicker) {
+      const handlePromise = window.showSaveFilePicker({
+        suggestedName: sanitizeFileName(fileName),
+        types: [
+          {
+            description: "Image",
+            accept: {
+              "image/*": [".png", ".jpg", ".jpeg", ".webp", ".gif"],
+            },
+          },
+        ],
+      });
+      const blob = await imageSourceToBlob(source, recordId);
+      const handle = await handlePromise;
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      return "saved";
+    }
+    const blob = await imageSourceToBlob(source, recordId);
+    await writeBlobToPicker(blob, fileName);
+    return "saved";
+  } catch (error) {
+    if (isUserCancelledSave(error)) {
+      return "cancelled";
+    }
+    throw error;
+  }
 }
 
 export function consumePendingLazyCatReferenceFile() {

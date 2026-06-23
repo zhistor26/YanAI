@@ -1,0 +1,5 @@
+buildscript: node scripts/prepare-lpk-build.mjs
+pkgout: ./
+icon: ./icon.png
+manifest: ./lzc-manifest.yml
+contentdir: ./content

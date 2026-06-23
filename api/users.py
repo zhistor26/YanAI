@@ -1,21 +1,17 @@
 from __future__ import annotations
 
-from datetime import datetime
-from io import BytesIO
-from pathlib import Path
 from urllib.parse import urlencode
-from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 
-from api.support import require_admin, require_identity, resolve_image_base_url
+from api.support import require_account_user, require_admin, require_identity, resolve_image_base_url
 from services.auth_service import DEFAULT_USER_IMAGE_CHANNEL_MODELS, auth_service
 from services.channel_service import channel_service
 from services.config import config
-from services.image_service import collect_downloadable_images, delete_images, list_images
+from services.image_service import delete_images, get_image_download_payload, list_images
 from services.log_service import audit_service
 from services.model_service import model_service
 from services import linuxdo_oauth_service
@@ -40,8 +36,10 @@ class ProfileUpdateRequest(BaseModel):
 
 
 class UserImageChannelRequest(BaseModel):
+    source: str = "default"
     enabled: bool = False
     name: str = ""
+    type: str = "openai_image"
     base_url: str = ""
     api_key: str = ""
     models: list[str] | str = Field(default_factory=lambda: list(DEFAULT_USER_IMAGE_CHANNEL_MODELS))
@@ -130,6 +128,7 @@ class ChannelRequest(BaseModel):
     name: str = ""
     base_url: str = ""
     api_key: str = ""
+    type: str = "openai_image"
     models: list[str] | str = Field(default_factory=lambda: list(DEFAULT_INTERNAL_MODELS))
     weight: int = 1
     priority: int = 0
@@ -141,6 +140,7 @@ class ChannelUpdateRequest(BaseModel):
     name: str | None = None
     base_url: str | None = None
     api_key: str | None = None
+    type: str | None = None
     models: list[str] | str | None = None
     weight: int | None = None
     priority: int | None = None
@@ -175,17 +175,6 @@ def _selection_targets(body: ImageSelectionRequest) -> tuple[list[str], list[str
         *[item.url for item in body.items if item.url],
     ]
     return record_ids, urls
-
-
-def _build_image_download_zip(downloads: list[dict[str, object]]) -> bytes:
-    archive = BytesIO()
-    with ZipFile(archive, mode="w", compression=ZIP_DEFLATED) as zip_file:
-        for item in downloads:
-            path = item.get("path")
-            if not isinstance(path, Path):
-                continue
-            zip_file.write(path, arcname=str(item.get("name") or path.name))
-    return archive.getvalue()
 
 
 def create_router() -> APIRouter:
@@ -225,6 +214,29 @@ def create_router() -> APIRouter:
         except Exception as exc:
             raise HTTPException(status_code=400, detail={"error": f"failed to send verification email: {exc}"}) from exc
         return {"ok": True, "required": config.email_verification_enabled}
+
+    @router.post("/auth/lazycat/login")
+    async def lazycat_login(request: Request):
+        uid = str(request.headers.get("X-HC-User-ID") or request.headers.get("x-hc-user-id") or "").strip()
+        if not uid:
+            raise HTTPException(status_code=401, detail={"error": "lazycat user identity is missing"})
+        platform_role = str(
+            request.headers.get("X-HC-User-Role") or request.headers.get("x-hc-user-role") or "NORMAL"
+        ).strip()
+        try:
+            user, token = auth_service.login_lazycat_user(uid=uid, platform_role=platform_role)
+        except ValueError as exc:
+            raise HTTPException(status_code=401, detail={"error": str(exc)}) from exc
+        return {
+            "ok": True,
+            "version": config.app_version,
+            "role": user.get("role"),
+            "subject_id": user.get("id"),
+            "name": user.get("name"),
+            "email": user.get("email"),
+            "quota": user.get("quota"),
+            "token": token,
+        }
 
     @router.post("/auth/register")
     async def register(body: RegisterRequest):
@@ -276,20 +288,17 @@ def create_router() -> APIRouter:
 
     @router.get("/api/me")
     async def get_me(authorization: str | None = Header(default=None)):
-        identity = require_identity(authorization)
-        if identity.get("role") == "user":
-            user = auth_service.get_user(str(identity.get("id") or ""))
-            if user is not None:
-                return {"user": user}
-        return {"user": identity}
+        _, user_id = require_account_user(authorization)
+        user = auth_service.get_user(user_id)
+        if user is not None:
+            return {"user": user}
+        raise HTTPException(status_code=404, detail={"error": "user not found"})
 
     @router.post("/api/me/profile")
     async def update_profile(body: ProfileUpdateRequest, authorization: str | None = Header(default=None)):
-        identity = require_identity(authorization)
-        if identity.get("role") != "user":
-            return {"user": identity}
+        _, user_id = require_account_user(authorization)
         try:
-            user = auth_service.update_user(str(identity.get("id") or ""), body.model_dump(exclude_none=True))
+            user = auth_service.update_user(user_id, body.model_dump(exclude_none=True))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
         if user is None:
@@ -298,21 +307,21 @@ def create_router() -> APIRouter:
 
     @router.get("/api/me/image-channel")
     async def get_my_image_channel(authorization: str | None = Header(default=None)):
-        identity = require_identity(authorization)
-        if identity.get("role") != "user":
-            raise HTTPException(status_code=403, detail={"error": "user permission required"})
+        _, user_id = require_account_user(authorization)
         try:
-            channel = auth_service.get_user_image_channel_config(str(identity.get("id") or ""))
+            channel = auth_service.get_user_image_channel_config(user_id)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail={"error": str(exc)}) from exc
-        return {"channel": channel}
+        default_channels = [
+            item
+            for item in channel_service.list_channels(include_internal=False)
+            if bool(item.get("enabled", True))
+        ]
+        return {"channel": channel, "default_channels": default_channels}
 
     @router.post("/api/me/image-channel")
     async def save_my_image_channel(body: UserImageChannelRequest, authorization: str | None = Header(default=None)):
-        identity = require_identity(authorization)
-        if identity.get("role") != "user":
-            raise HTTPException(status_code=403, detail={"error": "user permission required"})
-        user_id = str(identity.get("id") or "")
+        identity, user_id = require_account_user(authorization)
         try:
             channel = auth_service.save_user_image_channel_config(user_id, body.model_dump(mode="python"))
         except ValueError as exc:
@@ -323,6 +332,7 @@ def create_router() -> APIRouter:
             resource="image_channel",
             target_id=user_id,
             detail={
+                "source": channel.get("source"),
                 "enabled": channel.get("enabled"),
                 "name": channel.get("name"),
                 "base_url": channel.get("base_url"),
@@ -338,10 +348,7 @@ def create_router() -> APIRouter:
             body: UserImageChannelTestRequest | None = None,
             authorization: str | None = Header(default=None),
     ):
-        identity = require_identity(authorization)
-        if identity.get("role") != "user":
-            raise HTTPException(status_code=403, detail={"error": "user permission required"})
-        user_id = str(identity.get("id") or "")
+        _, user_id = require_account_user(authorization)
         updates = {} if body is None else body.model_dump(exclude={"test_models"}, mode="python")
         selected_models = [] if body is None else body.test_models
         try:
@@ -362,11 +369,9 @@ def create_router() -> APIRouter:
 
     @router.post("/api/me/redeem")
     async def redeem(body: RedeemRequest, authorization: str | None = Header(default=None)):
-        identity = require_identity(authorization)
-        if identity.get("role") != "user":
-            raise HTTPException(status_code=403, detail={"error": "user permission required"})
+        _, user_id = require_account_user(authorization)
         try:
-            user, code = auth_service.redeem_code(str(identity.get("id") or ""), body.code)
+            user, code = auth_service.redeem_code(user_id, body.code)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
         return {"user": user, "redeem_code": code}
@@ -380,30 +385,55 @@ def create_router() -> APIRouter:
             page_size: int = 48,
             authorization: str | None = Header(default=None),
     ):
-        identity = require_identity(authorization)
-        if identity.get("role") != "user":
-            raise HTTPException(status_code=403, detail={"error": "user permission required"})
+        identity, user_id = require_account_user(authorization)
         return list_images(
             resolve_image_base_url(request),
             start_date=start_date.strip(),
             end_date=end_date.strip(),
-            owner_user_id=str(identity.get("id") or ""),
+            owner_user_id=user_id,
             page=page,
             page_size=page_size,
         )
 
+    @router.get("/api/me/images/file")
+    async def download_my_image_file(
+            record_id: str = "",
+            url: str = "",
+            authorization: str | None = Header(default=None),
+    ):
+        _, user_id = require_account_user(authorization)
+        try:
+            payload = await run_in_threadpool(
+                get_image_download_payload,
+                record_id=record_id.strip(),
+                url=url.strip(),
+                owner_user_id=user_id,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail={"error": str(exc)}) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=404, detail={"error": str(exc)}) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail={"error": f"failed to fetch image: {exc}"}) from exc
+
+        if payload.path is not None:
+            return FileResponse(payload.path, filename=payload.name, media_type=payload.media_type)
+        return Response(
+            content=payload.data or b"",
+            media_type=payload.media_type,
+            headers={"Content-Disposition": f'attachment; filename="{payload.name}"'},
+        )
+
     @router.delete("/api/me/images")
     async def delete_my_images(body: ImageSelectionRequest, authorization: str | None = Header(default=None)):
-        identity = require_identity(authorization)
-        if identity.get("role") != "user":
-            raise HTTPException(status_code=403, detail={"error": "user permission required"})
+        identity, user_id = require_account_user(authorization)
         record_ids, urls = _selection_targets(body)
         if not any(str(value or "").strip() for value in [*record_ids, *urls]):
             raise HTTPException(status_code=400, detail={"error": "image ids or urls are required"})
         result = delete_images(
             record_ids=record_ids,
             urls=urls,
-            owner_user_id=str(identity.get("id") or ""),
+            owner_user_id=user_id,
         )
         audit_service.add(
             actor=identity,
@@ -417,53 +447,23 @@ def create_router() -> APIRouter:
         )
         return result
 
-    @router.post("/api/me/images/download")
-    async def download_my_images(body: ImageSelectionRequest, authorization: str | None = Header(default=None)):
-        identity = require_identity(authorization)
-        if identity.get("role") != "user":
-            raise HTTPException(status_code=403, detail={"error": "user permission required"})
-        record_ids, urls = _selection_targets(body)
-        if not any(str(value or "").strip() for value in [*record_ids, *urls]):
-            raise HTTPException(status_code=400, detail={"error": "image ids or urls are required"})
-        downloads = await run_in_threadpool(
-            collect_downloadable_images,
-            record_ids=record_ids,
-            urls=urls,
-            owner_user_id=str(identity.get("id") or ""),
-        )
-        if not downloads:
-            raise HTTPException(status_code=404, detail={"error": "no downloadable local image files found"})
-        content = await run_in_threadpool(_build_image_download_zip, downloads)
-        filename = f"my-images-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
-        return StreamingResponse(
-            iter([content]),
-            media_type="application/zip",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-        )
-
     @router.get("/api/me/images/webdav")
     async def get_my_images_webdav(authorization: str | None = Header(default=None)):
-        identity = require_identity(authorization)
-        if identity.get("role") != "user":
-            raise HTTPException(status_code=403, detail={"error": "user permission required"})
-        return {"webdav": get_webdav_config("user", user_id=str(identity.get("id") or ""))}
+        _, user_id = require_account_user(authorization)
+        return {"webdav": get_webdav_config("user", user_id=user_id)}
 
     @router.post("/api/me/images/webdav")
     async def save_my_images_webdav(body: WebDAVConfigRequest, authorization: str | None = Header(default=None)):
-        identity = require_identity(authorization)
-        if identity.get("role") != "user":
-            raise HTTPException(status_code=403, detail={"error": "user permission required"})
+        _, user_id = require_account_user(authorization)
         try:
-            webdav = save_webdav_config("user", body.model_dump(mode="python"), user_id=str(identity.get("id") or ""))
+            webdav = save_webdav_config("user", body.model_dump(mode="python"), user_id=user_id)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
         return {"webdav": webdav}
 
     @router.post("/api/me/images/webdav/sync")
     async def sync_my_images_webdav(body: MyImagesWebDAVSyncRequest, authorization: str | None = Header(default=None)):
-        identity = require_identity(authorization)
-        if identity.get("role") != "user":
-            raise HTTPException(status_code=403, detail={"error": "user permission required"})
+        identity, user_id = require_account_user(authorization)
         try:
             result = await run_in_threadpool(
                 sync_images_to_webdav,

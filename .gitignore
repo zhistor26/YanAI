@@ -43,3 +43,21 @@ web/.vercel/
 web/*.tsbuildinfo
 
 Plan.md
+
+# LPK / lzc-cli build artifacts
+*.lpk
+.lzc-cli-build*/
+.lzc-cli-install*/
+.lzc-cli-cache/
+yanai-src.tar.gz
+lzc-build-image-context.tar
+.yanai-src-files.txt
+.prepare-source-tar.py
+
+# Local tooling / unrelated subprojects
+.tools/
+.xxlcode/
+anima/
+tapmap/
+appshots_tmp/
+make-look-scanned-lpk/

@@ -34,7 +34,6 @@ import {
 import { WebDAVSettingsDialog } from "@/components/webdav-settings-dialog";
 import {
   deleteMyImages,
-  downloadMyImages,
   fetchMyImages,
   fetchMyImagesWebDAVConfig,
   syncMyImagesToWebDAV,
@@ -44,6 +43,7 @@ import {
   type ManagedImage,
   type ManagedImageDeleteTarget,
 } from "@/lib/api";
+import { saveImageSourceWithToast } from "@/lib/save-image";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 function formatSize(size: number) {
@@ -68,25 +68,8 @@ function safeDownloadName(item: ManagedImage) {
   return name || "image.png";
 }
 
-function downloadUrl(item: ManagedImage) {
-  const link = document.createElement("a");
-  link.href = item.url;
-  link.download = safeDownloadName(item);
-  link.rel = "noreferrer";
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-}
-
-function downloadBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+function saveImageItem(item: ManagedImage) {
+  return saveImageSourceWithToast(item.url, safeDownloadName(item), item.record_id || item.id || "");
 }
 
 function MyImagesContent() {
@@ -103,7 +86,6 @@ function MyImagesContent() {
   const [deleteTarget, setDeleteTarget] = useState<ManagedImageDeleteTarget[] | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isDeleting, setIsDeleting] = useState(false);
-  const [isDownloading, setIsDownloading] = useState(false);
   const [isSavingWebDAV, setIsSavingWebDAV] = useState(false);
   const [isSyncingWebDAV, setIsSyncingWebDAV] = useState(false);
   const pageSize = 12;
@@ -118,6 +100,8 @@ function MyImagesContent() {
   const lightboxImages = items.map((item) => ({
     id: item.name,
     src: item.url,
+    recordId: item.record_id || item.id || "",
+    fileName: safeDownloadName(item),
     sizeLabel: formatSize(item.size),
   }));
 
@@ -245,23 +229,6 @@ function MyImagesContent() {
     }
   };
 
-  const downloadSelectedImages = async () => {
-    if (selectedTargets.length === 0) {
-      toast.error("请先选择要下载的图片");
-      return;
-    }
-    setIsDownloading(true);
-    try {
-      const blob = await downloadMyImages(selectedTargets);
-      downloadBlob(blob, `my-images-${Date.now()}.zip`);
-      toast.success(`已开始下载 ${selectedTargets.length} 张图片`);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "下载图片失败");
-    } finally {
-      setIsDownloading(false);
-    }
-  };
-
   useEffect(() => {
     void loadImages();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -333,15 +300,6 @@ function MyImagesContent() {
                 </Button>
               ) : null}
               <Button
-                variant="outline"
-                className="h-8 rounded-lg border-rose-100 bg-white px-3 text-stone-600"
-                onClick={() => void downloadSelectedImages()}
-                disabled={selectedCount === 0 || isLoading || isDownloading}
-              >
-                {isDownloading ? <LoaderCircle className="size-4 animate-spin" /> : <Download className="size-4" />}
-                下载所选
-              </Button>
-              <Button
                 variant="destructive"
                 className="h-8 rounded-lg px-3"
                 onClick={openDeleteSelected}
@@ -398,11 +356,10 @@ function MyImagesContent() {
                             size="icon"
                             className="size-8 rounded-lg text-stone-400 hover:bg-rose-50 hover:text-rose-600"
                             onClick={() => {
-                              downloadUrl(item);
-                              toast.success("已开始下载图片");
+                              void saveImageItem(item);
                             }}
-                            aria-label="下载图片"
-                            title="下载图片"
+                            aria-label="保存图片"
+                            title="保存图片"
                           >
                             <Download className="size-4" />
                           </Button>
@@ -482,7 +439,7 @@ function MyImagesContent() {
 }
 
 export default function MyImagesPage() {
-  const { isCheckingAuth, session } = useAuthGuard(["user"]);
+  const { isCheckingAuth, session } = useAuthGuard(["user", "admin"]);
   if (isCheckingAuth || !session) {
     return (
       <div className="flex min-h-[40vh] items-center justify-center">
