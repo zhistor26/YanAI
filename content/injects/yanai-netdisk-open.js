@@ -2,6 +2,7 @@
   "use strict";
 
   var DISK = "/_lzc/files/home";
+  var AUTH_KEY = "chatgpt2api_auth_key";
 
   function normalizePath(raw) {
     var path = raw;
@@ -29,6 +30,43 @@
     });
   }
 
+  function openAuthDb() {
+    return new Promise(function (resolve, reject) {
+      var req = indexedDB.open("chatgpt2api");
+      req.onerror = function () {
+        reject(req.error || new Error("indexedDB open failed"));
+      };
+      req.onupgradeneeded = function (ev) {
+        var db = ev.target.result;
+        if (!db.objectStoreNames.contains("auth")) {
+          db.createObjectStore("auth");
+        }
+      };
+      req.onsuccess = function (ev) {
+        var db = ev.target.result;
+        if (!db.objectStoreNames.contains("auth")) {
+          reject(new Error("auth store missing"));
+          return;
+        }
+        resolve(db.transaction("auth", "readonly"));
+      };
+    });
+  }
+
+  function readAuthKey() {
+    return openAuthDb().then(function (tx) {
+      return new Promise(function (resolve, reject) {
+        var req = tx.objectStore("auth").get(AUTH_KEY);
+        req.onsuccess = function () {
+          resolve(String(req.result || "").trim());
+        };
+        req.onerror = function () {
+          reject(req.error);
+        };
+      });
+    });
+  }
+
   function notifyFileError(message) {
     console.error("[yanai-netdisk-open]", message);
     window.dispatchEvent(
@@ -42,14 +80,13 @@
       location.replace("/image/?from=lazycat");
       return;
     }
+    try {
+      history.replaceState(null, "", "/image/?from=lazycat");
+    } catch (_) {}
     window.dispatchEvent(new CustomEvent("yanai:lazycat-file", { detail: { file: file } }));
   }
 
-  function run() {
-    var params = new URLSearchParams(location.search);
-    var fileParam = params.get("file");
-    if (!fileParam) return;
-
+  function openFileParam(fileParam) {
     var path;
     try {
       path = normalizePath(fileParam);
@@ -70,6 +107,21 @@
       })
       .catch(function (err) {
         notifyFileError(err && err.message ? err.message : err);
+      });
+  }
+
+  function run() {
+    var params = new URLSearchParams(location.search);
+    var fileParam = params.get("file");
+    if (!fileParam) return;
+
+    readAuthKey()
+      .then(function (authKey) {
+        if (!authKey) return;
+        openFileParam(fileParam);
+      })
+      .catch(function () {
+        // The app auth guard/autologin will preserve the current URL and retry after login.
       });
   }
 

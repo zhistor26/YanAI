@@ -961,7 +961,9 @@ export function ImageComposer({
             multiple
             className="hidden"
             onChange={(event) => {
-              void onReferenceImageChange(Array.from(event.target.files || []));
+              const files = Array.from(event.currentTarget.files || []);
+              event.currentTarget.value = "";
+              void onReferenceImageChange(files);
             }}
           />
         )}

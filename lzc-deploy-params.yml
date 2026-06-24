@@ -8,11 +8,17 @@ params:
   - id: channel_api_key
     type: secret
     name: 图片 API Key
-    description: 对应渠道的 Bearer Token；留空则使用内置默认 Key
-    optional: true
+    description: 对应渠道的 Bearer Token；用于首次启动时创建默认图片渠道
+    optional: false
   - id: channel_models
     type: string
     name: 默认模型
     description: 逗号分隔，例如 gpt-image-2
     default_value: gpt-image-2
+    optional: true
+  - id: channel_timeout
+    type: string
+    name: 生图超时秒数
+    description: 异步图片任务最长等待时间，网络慢或队列拥堵时可调大
+    default_value: "300"
     optional: true

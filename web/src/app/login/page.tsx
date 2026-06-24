@@ -11,8 +11,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import webConfig from "@/constants/common-env";
 import { fetchRegisterOptions, login, type RegisterOptions } from "@/lib/api";
-import { useRedirectIfAuthenticated } from "@/lib/use-auth-guard";
-import { getDefaultRouteForRole, setStoredAuthSession } from "@/store/auth";
+import { getPostAuthRedirect, rememberPostAuthRedirect, useRedirectIfAuthenticated } from "@/lib/use-auth-guard";
+import { setStoredAuthSession } from "@/store/auth";
 import { cn } from "@/lib/utils";
 
 type LoginMode = "user" | "admin";
@@ -36,6 +36,7 @@ export default function LoginPage() {
   const startLinuxDoOAuth = () => {
     const startPath = registerOptions?.linuxdo_start_url || "/auth/linuxdo/start";
     const apiBase = webConfig.apiUrl.replace(/\/$/, "");
+    rememberPostAuthRedirect(getPostAuthRedirect("user"));
     window.location.href = `${apiBase}${startPath}`;
   };
 
@@ -58,7 +59,7 @@ export default function LoginPage() {
         email: data.email,
         quota: data.quota,
       });
-      router.replace(getDefaultRouteForRole(data.role));
+      router.replace(getPostAuthRedirect(data.role, { consume: true }));
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "登录失败");
     } finally {

@@ -5,7 +5,8 @@ import { useEffect } from "react";
 import { LoaderCircle } from "lucide-react";
 import { toast } from "sonner";
 
-import { getDefaultRouteForRole, setStoredAuthSession, type AuthRole } from "@/store/auth";
+import { getPostAuthRedirect } from "@/lib/use-auth-guard";
+import { setStoredAuthSession, type AuthRole } from "@/store/auth";
 
 function readFragmentParams() {
   if (typeof window === "undefined") {
@@ -43,7 +44,7 @@ export default function OAuthCallbackPage() {
       email: params.get("email") || undefined,
       quota: Number(params.get("quota") || 0),
     }).then(() => {
-      router.replace(getDefaultRouteForRole(role as AuthRole));
+      router.replace(getPostAuthRedirect(role as AuthRole, { consume: true }));
     });
   }, [router]);
 

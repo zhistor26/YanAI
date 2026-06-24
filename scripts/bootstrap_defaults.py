@@ -11,6 +11,8 @@ from pathlib import Path
 DATA_DIR = Path("/app/data")
 CONFIG_FILE = Path(os.getenv("YANAI_CONFIG_FILE", "/app/config/config.json"))
 DEFAULT_CHANNEL_URL = os.getenv("YANAI_DEFAULT_CHANNEL_URL", "https://otuapi.com").strip().rstrip("/")
+if not DEFAULT_CHANNEL_URL:
+    DEFAULT_CHANNEL_URL = "https://otuapi.com"
 DEFAULT_CHANNEL_NAME = os.getenv("YANAI_DEFAULT_CHANNEL_NAME", "otuapi").strip() or "otuapi"
 DEFAULT_CHANNEL_KEY = os.getenv("YANAI_DEFAULT_CHANNEL_API_KEY", "").strip()
 DEFAULT_CHANNEL_TYPE = os.getenv("YANAI_DEFAULT_CHANNEL_TYPE", "async_videos").strip() or "async_videos"
@@ -19,6 +21,10 @@ DEFAULT_CHANNEL_MODELS = [
     for item in os.getenv("YANAI_DEFAULT_CHANNEL_MODELS", "gpt-image-2").replace(";", ",").split(",")
     if item.strip()
 ] or ["gpt-image-2"]
+try:
+    DEFAULT_CHANNEL_TIMEOUT = max(60, int(os.getenv("YANAI_DEFAULT_CHANNEL_TIMEOUT", "300") or 300))
+except (TypeError, ValueError):
+    DEFAULT_CHANNEL_TIMEOUT = 300
 
 
 def _now_iso() -> str:
@@ -87,7 +93,7 @@ def ensure_default_channel() -> None:
         "models": DEFAULT_CHANNEL_MODELS,
         "weight": 1,
         "priority": 10,
-        "timeout": 180,
+        "timeout": DEFAULT_CHANNEL_TIMEOUT,
         "enabled": True,
         "updated_at": _now_iso(),
     }

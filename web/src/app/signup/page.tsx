@@ -11,7 +11,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import webConfig from "@/constants/common-env";
 import { fetchRegisterOptions, registerPersonalUser, sendRegisterVerificationCode, type RegisterOptions } from "@/lib/api";
-import { useRedirectIfAuthenticated } from "@/lib/use-auth-guard";
+import { getPostAuthRedirect, rememberPostAuthRedirect, useRedirectIfAuthenticated } from "@/lib/use-auth-guard";
 import { setStoredAuthSession } from "@/store/auth";
 
 export default function SignupPage() {
@@ -34,6 +34,7 @@ export default function SignupPage() {
   const startLinuxDoOAuth = () => {
     const startPath = registerOptions?.linuxdo_start_url || "/auth/linuxdo/start";
     const apiBase = webConfig.apiUrl.replace(/\/$/, "");
+    rememberPostAuthRedirect(getPostAuthRedirect("user"));
     window.location.href = `${apiBase}${startPath}`;
   };
 
@@ -66,7 +67,7 @@ export default function SignupPage() {
         email: data.user.email,
         quota: data.user.quota,
       });
-      router.replace("/image");
+      router.replace(getPostAuthRedirect(data.user.role, { consume: true }));
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "注册失败");
     } finally {

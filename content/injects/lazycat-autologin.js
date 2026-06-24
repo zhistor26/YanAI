@@ -13,6 +13,22 @@
     return "/image/";
   }
 
+  function redirectTargetForRole(role) {
+    var fallback = routeForRole(role);
+    var redirect = "";
+    try {
+      redirect = new URLSearchParams(location.search).get("redirect") || "";
+    } catch (_) {}
+    redirect = String(redirect || "").trim();
+    if (!redirect || redirect.charAt(0) !== "/" || redirect.indexOf("//") === 0) {
+      return fallback;
+    }
+    if (redirect.indexOf("/login") === 0 || redirect.indexOf("/signup") === 0 || redirect.indexOf("/oauth/") === 0) {
+      return fallback;
+    }
+    return redirect;
+  }
+
   function openAuthDb(mode) {
     return new Promise(function (resolve, reject) {
       var req = indexedDB.open("chatgpt2api");
@@ -100,7 +116,7 @@
         if (!data.token) throw new Error("missing token");
         return saveSession(data).then(function () {
           sessionStorage.setItem(DONE_FLAG, "1");
-          var target = routeForRole(data.role);
+          var target = redirectTargetForRole(data.role);
           if (location.pathname.indexOf("/login") === 0 || location.pathname === "/") {
             location.replace(target);
           } else {

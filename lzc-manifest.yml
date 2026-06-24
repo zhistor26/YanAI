@@ -72,10 +72,12 @@ services:
     environment:
       - STORAGE_BACKEND=json
       - YANAI_CONFIG_FILE=/app/config/config.json
-      - YANAI_DEFAULT_CHANNEL_URL=https://otuapi.com
+      - YANAI_DEFAULT_CHANNEL_URL={{ .U.channel_url }}
       - YANAI_DEFAULT_CHANNEL_NAME=otuapi
+      - YANAI_DEFAULT_CHANNEL_API_KEY={{ .U.channel_api_key }}
       - YANAI_DEFAULT_CHANNEL_TYPE=async_videos
-      - YANAI_DEFAULT_CHANNEL_MODELS=gpt-image-2
+      - YANAI_DEFAULT_CHANNEL_MODELS={{ .U.channel_models }}
+      - YANAI_DEFAULT_CHANNEL_TIMEOUT={{ .U.channel_timeout }}
       - YANAI_DEFAULT_USER_QUOTA=100
       - CHATGPT2API_AUTH_KEY={{ stable_secret "yanai_auth_key" }}
       - CHATGPT2API_BASE_URL=https://{{ .S.AppDomain }}

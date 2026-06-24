@@ -10,10 +10,60 @@ import {
   type StoredAuthSession,
 } from "@/store/auth";
 
+const POST_AUTH_REDIRECT_STORAGE_KEY = "yanai_post_auth_redirect";
+
 type UseAuthGuardResult = {
   isCheckingAuth: boolean;
   session: StoredAuthSession | null;
 };
+
+function currentPathWithSearch() {
+  if (typeof window === "undefined") {
+    return "/image";
+  }
+  return `${window.location.pathname}${window.location.search}${window.location.hash}`;
+}
+
+function normalizeLocalRedirect(value: string | null | undefined, fallback: string) {
+  const target = String(value || "").trim();
+  if (!target || !target.startsWith("/") || target.startsWith("//")) {
+    return fallback;
+  }
+  if (target.startsWith("/login") || target.startsWith("/signup") || target.startsWith("/oauth/")) {
+    return fallback;
+  }
+  return target;
+}
+
+function loginRouteWithRedirect(target: string) {
+  const redirect = normalizeLocalRedirect(target, "/image");
+  return `/login?redirect=${encodeURIComponent(redirect)}`;
+}
+
+export function rememberPostAuthRedirect(target: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  const redirect = normalizeLocalRedirect(target, "");
+  if (!redirect) {
+    return;
+  }
+  window.sessionStorage.setItem(POST_AUTH_REDIRECT_STORAGE_KEY, redirect);
+}
+
+export function getPostAuthRedirect(role: AuthRole, options: { consume?: boolean } = {}) {
+  const fallback = getDefaultRouteForRole(role);
+  if (typeof window === "undefined") {
+    return fallback;
+  }
+  const params = new URLSearchParams(window.location.search);
+  const fromQuery = normalizeLocalRedirect(params.get("redirect"), "");
+  const fromStorage = normalizeLocalRedirect(window.sessionStorage.getItem(POST_AUTH_REDIRECT_STORAGE_KEY), "");
+  if (options.consume) {
+    window.sessionStorage.removeItem(POST_AUTH_REDIRECT_STORAGE_KEY);
+  }
+  return fromQuery || fromStorage || fallback;
+}
 
 export function useAuthGuard(allowedRoles?: AuthRole[]): UseAuthGuardResult {
   const router = useRouter();
@@ -34,7 +84,7 @@ export function useAuthGuard(allowedRoles?: AuthRole[]): UseAuthGuardResult {
       if (!storedSession) {
         setSession(null);
         setIsCheckingAuth(false);
-        router.replace("/login");
+        router.replace(loginRouteWithRedirect(currentPathWithSearch()));
         return;
       }
 
@@ -72,7 +122,7 @@ export function useRedirectIfAuthenticated() {
       }
 
       if (storedSession) {
-        router.replace(getDefaultRouteForRole(storedSession.role));
+        router.replace(getPostAuthRedirect(storedSession.role, { consume: true }));
         return;
       }
 
